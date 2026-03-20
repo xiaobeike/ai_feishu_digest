@@ -23,6 +23,12 @@
 
 ## 本地运行
 
+建议直接在仓库目录运行（避免你机器上存在多份拷贝导致行为不一致）：
+
+```bash
+cd /path/to/ai_feishu_digest
+```
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -43,6 +49,9 @@ export BAIDU_APIKEY='REPLACE_ME'
 python ai_feishu_digest/digest.py > ai_feishu_digest/out.md
 python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 ```
+
+本地与 GitHub Actions 共用同一套代码逻辑：都通过环境变量读取 webhook 和翻译密钥。
+区别仅在于环境变量来源：本地来自你的 shell（`export ...`），GitHub 来自仓库 Secrets（workflow 注入到 `env`）。
 
 ## GitHub Actions 配置（每天 08:00 北京时间）
 
@@ -70,6 +79,24 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 - 下载本次 run 的 artifact：`ai-tech-digest`，检查 `out.md` 内容是否正常
 
 备注：部分媒体 RSS 可能对 GitHub Runner IP 有限流/403；可以通过替换源、减少源或调整频率解决。
+
+## GitHub 调试方法
+
+1) 先看 artifact
+
+- 每次 workflow 运行都会上传 `ai-tech-digest/out.md`
+- 这是 GitHub Runner 真实生成的最终内容，用它判断“抓取是否成功/是否已翻译/格式是否符合”
+
+2) 再看 Actions 日志
+
+- workflow 中包含 `Debug translation` 步骤：
+  - 只打印 `BAIDU_FANYI_APPID/BAIDU_APIKEY` 是否 set（不会泄露密钥）
+  - 并做一次 `Hello world -> 你好世界` 的翻译冒烟测试
+
+3) 推送问题排查（企业微信）
+
+- 可在 workflow 中临时增加 `PUSH_DEBUG=1`（或本地 `export PUSH_DEBUG=1`）
+- 这样会在日志中打印企业微信 webhook 分片发送情况（是否拆成多条，以及每段是否 ok）
 
 ## 自定义（AI 优先）
 
