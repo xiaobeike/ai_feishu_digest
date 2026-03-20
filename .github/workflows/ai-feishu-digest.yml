@@ -53,6 +53,7 @@ jobs:
         with:
           name: ai-tech-digest
           path: ai_feishu_digest/out.md
+          retention-days: 7
 
       - name: Send digest
         run: |
