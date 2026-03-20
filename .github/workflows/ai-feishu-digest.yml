@@ -1,5 +1,9 @@
 name: AI Feishu Digest
 
+env:
+  # Opt into Node.js 24 for JavaScript-based actions.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   schedule:
     # GitHub Actions schedule is UTC. 08:00 Beijing = 00:00 UTC.

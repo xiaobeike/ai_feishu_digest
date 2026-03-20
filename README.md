@@ -58,6 +58,8 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 - 中文翻译（百度翻译）：
   - `BAIDU_FANYI_APPID`
   - `BAIDU_APIKEY`
+
+如果没有配置百度翻译（或配置错误），推送内容会保持为英文标题/摘要。
 - 推飞书（可选）：
   - `FEISHU_WEBHOOK_URL`
   - `FEISHU_SIGNING_SECRET`（可选）
