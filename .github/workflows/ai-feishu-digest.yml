@@ -17,6 +17,15 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+      WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+      FEISHU_SIGNING_SECRET: ${{ secrets.FEISHU_SIGNING_SECRET }}
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      BAIDU_FANYI_APPID: ${{ secrets.BAIDU_FANYI_APPID }}
+      BAIDU_APIKEY: ${{ secrets.BAIDU_APIKEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,6 +40,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r ai_feishu_digest/requirements.txt
 
+      - name: Debug translation
+        run: |
+          python -c "import os,sys; sys.path.insert(0,'ai_feishu_digest'); from translate_baidu import baidu_enabled, translate_lines_zh; print('BAIDU_FANYI_APPID=' + ('set' if os.getenv('BAIDU_FANYI_APPID') else 'missing')); print('BAIDU_APIKEY=' + ('set' if os.getenv('BAIDU_APIKEY') else 'missing')); print('baidu_enabled=' + str(baidu_enabled())); print('test=' + str(translate_lines_zh(['Hello world'])[0]))"
+
       - name: Generate digest
         run: |
           python ai_feishu_digest/digest.py > ai_feishu_digest/out.md
@@ -42,14 +55,5 @@ jobs:
           path: ai_feishu_digest/out.md
 
       - name: Send digest
-        env:
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
-          FEISHU_SIGNING_SECRET: ${{ secrets.FEISHU_SIGNING_SECRET }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
-          BAIDU_FANYI_APPID: ${{ secrets.BAIDU_FANYI_APPID }}
-          BAIDU_APIKEY: ${{ secrets.BAIDU_APIKEY }}
         run: |
           python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
