@@ -1,5 +1,7 @@
 import calendar
+import html
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -50,6 +52,7 @@ def _normalize_title(title: str) -> str:
 
 def _strip_html(s: str) -> str:
     s = s or ""
+    s = html.unescape(s)
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -210,31 +213,59 @@ def render_markdown(items: list[Item], limit: int, hours: int) -> str:
 
     take = items[:limit]
 
+    prefer_llm = os.getenv("PREFER_LLM", "").strip().lower() in ("1", "true", "yes")
+
     zh_map = {}
-    if llm_enabled():
+    if prefer_llm and llm_enabled():
         req = []
         for i, it in enumerate(take, start=1):
             req.append({"idx": i, "source": it.source, "title": it.title, "summary": it.summary})
         zh_map = zh_title_and_summary(items=req)
 
-    baidu_titles = []
-    baidu_summaries = []
-    if (not zh_map) and baidu_enabled():
-        baidu_titles = translate_lines_zh([it.title for it in take])
-        baidu_summaries = translate_lines_zh([_shorten(it.summary, 160) for it in take])
+    baidu_title_map: dict[int, str] = {}
+    baidu_summary_map: dict[int, str] = {}
+    if baidu_enabled():
+        need_title_idx: list[int] = []
+        need_title_lines: list[str] = []
+        need_sum_idx: list[int] = []
+        need_sum_lines: list[str] = []
+
+        for i, it in enumerate(take, start=1):
+            zh = zh_map.get(i, {}) if isinstance(zh_map, dict) else {}
+            if (not str(zh.get("title_zh", "")).strip()) and it.title:
+                need_title_idx.append(i)
+                need_title_lines.append(it.title)
+
+            if it.summary and (not str(zh.get("summary_zh", "")).strip()):
+                need_sum_idx.append(i)
+                need_sum_lines.append(_shorten(it.summary, 160))
+
+        if need_title_lines:
+            got = translate_lines_zh(need_title_lines)
+            if len(got) == len(need_title_idx):
+                for idx, s in zip(need_title_idx, got):
+                    if isinstance(s, str) and s.strip():
+                        baidu_title_map[idx] = s.strip()
+
+        if need_sum_lines:
+            got = translate_lines_zh(need_sum_lines)
+            if len(got) == len(need_sum_idx):
+                for idx, s in zip(need_sum_idx, got):
+                    if isinstance(s, str) and s.strip():
+                        baidu_summary_map[idx] = s.strip()
 
     for i, it in enumerate(take, start=1):
         zh = zh_map.get(i, {})
         if zh.get("title_zh"):
             title_show = zh["title_zh"]
-        elif baidu_titles:
-            title_show = baidu_titles[i - 1] or it.title
+        elif i in baidu_title_map:
+            title_show = baidu_title_map[i]
         else:
             title_show = it.title
         summary_show = zh.get("summary_zh", "").strip()
         if not summary_show and it.summary:
-            if baidu_summaries:
-                summary_show = (baidu_summaries[i - 1] or "").strip()
+            if i in baidu_summary_map:
+                summary_show = baidu_summary_map[i]
             if not summary_show:
                 summary_show = _shorten(it.summary, 140)
 

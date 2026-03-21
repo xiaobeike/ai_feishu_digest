@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -57,7 +58,8 @@ def zh_title_and_summary(
 
     system = (
         "You are a bilingual editor. Translate titles into Simplified Chinese and write a short Chinese overview. "
-        "Keep it factual and neutral."
+        "Keep it factual and neutral. Always provide both title_zh and summary_zh; if the item summary is empty, "
+        "write a one-sentence takeaway based on the title."
     )
     user = (
         "For each item, produce JSON array with objects: "
@@ -93,9 +95,39 @@ def zh_title_and_summary(
     if not content:
         return {}
 
-    try:
-        arr = json.loads(content)
-    except Exception:
+    def _try_load_json_array(s: str):
+        s = (s or "").strip()
+        if not s:
+            return None
+
+        # Common model behavior: wrap JSON in Markdown fences.
+        if "```" in s:
+            m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s, flags=re.IGNORECASE)
+            if m:
+                inner = m.group(1).strip()
+                try:
+                    return json.loads(inner)
+                except Exception:
+                    pass
+
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
+
+        # Best-effort: extract the outermost JSON array.
+        i = s.find("[")
+        j = s.rfind("]")
+        if i != -1 and j != -1 and j > i:
+            cand = s[i : j + 1]
+            try:
+                return json.loads(cand)
+            except Exception:
+                return None
+        return None
+
+    arr = _try_load_json_array(content)
+    if arr is None:
         return {}
 
     out: Dict[int, Dict[str, str]] = {}

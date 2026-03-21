@@ -46,6 +46,14 @@ export FEISHU_WEBHOOK_URL='https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_
 export BAIDU_FANYI_APPID='REPLACE_ME'
 export BAIDU_APIKEY='REPLACE_ME'
 
+# （可选）LLM 中文化/摘要：OpenAI 兼容接口
+# 默认不会启用（即便你配了 LLM 环境变量）。如需启用，再显式打开：
+# export PREFER_LLM=1
+# 然后配置以下环境变量（三选一命名即可）：
+# export LLM_BASE_URL='https://api.openai.com'          # 或 OPENAI_BASE_URL
+# export LLM_API_KEY='REPLACE_ME'                      # 或 OPENAI_API_KEY
+# export LLM_MODEL='gpt-4o-mini'                       # 或 OPENAI_MODEL
+
 python ai_feishu_digest/digest.py > ai_feishu_digest/out.md
 python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 ```
@@ -69,6 +77,11 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
   - `BAIDU_APIKEY`
 
 如果没有配置百度翻译（或配置错误），推送内容会保持为英文标题/摘要。
+
+（可选）LLM 中文化/摘要：
+- 需要先显式开启：`PREFER_LLM=1`
+- 再配置：`LLM_MODEL`（必填）以及 `LLM_BASE_URL/LLM_API_KEY`（按你的服务需要）
+- 兼容别名：`OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL`
 - 推飞书（可选）：
   - `FEISHU_WEBHOOK_URL`
   - `FEISHU_SIGNING_SECRET`（可选）
