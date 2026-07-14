@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import feedparser
 
+from aihot import render_aihot_markdown
 from llm import llm_enabled, zh_title_and_summary
 from translate_baidu import baidu_enabled, translate_lines_zh
 
@@ -203,7 +204,7 @@ def fetch_items(cfg: dict) -> list[Item]:
 def render_markdown(items: list[Item], limit: int, hours: int) -> str:
     now_bj = datetime.now(BJ_TZ)
     date_str = now_bj.strftime("%Y-%m-%d")
-    header = f"# AI/科技日报（{date_str}）"
+    header = f"# 智能前沿日报（{date_str}）"
 
     lines: list[str] = [header]
     if not items:
@@ -275,12 +276,26 @@ def render_markdown(items: list[Item], limit: int, hours: int) -> str:
         lines.append(f"{i}. {title_show}")
         if summary_show:
             lines.append(f"- {summary_show}")
+        lines.append(f"- 来源：{it.source}")
         lines.append(f"- [全文]({it.link})")
     lines.append("")
     return "\n".join(lines)
 
 
 def main() -> int:
+    source = os.getenv("DIGEST_SOURCE", "aihot").strip().lower()
+    if source not in ("rss", "legacy"):
+        limit = int(os.getenv("DIGEST_LIMIT", "10"))
+        date_str = os.getenv("DIGEST_DATE", "").strip() or None
+        try:
+            md = render_aihot_markdown(date_str=date_str, limit=limit)
+            if "No items found" not in md:
+                sys.stdout.write(md)
+                return 0
+            sys.stderr.write("AI HOT returned no items; falling back to RSS.\n")
+        except Exception as exc:
+            sys.stderr.write(f"AI HOT fetch failed: {exc}; falling back to RSS.\n")
+
     cfg_path = Path(__file__).with_name("feeds.json")
     cfg = load_config(cfg_path)
     hours = int(cfg.get("hours", 24))

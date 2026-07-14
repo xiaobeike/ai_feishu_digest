@@ -1,5 +1,6 @@
 ai_feishu_digest/.venv/
 ai_feishu_digest/out.md
+ai_feishu_digest/preview.html
 __pycache__/
 *.pyc
 .DS_Store

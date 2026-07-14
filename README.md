@@ -1,24 +1,27 @@
 # ai_feishu_digest
 
-每天早上 8 点（北京时间）自动抓取 AI/AI 开发者/AI 技术相关 RSS，生成中文简报，并推送到群（企业微信群机器人 / 飞书群机器人）。
+每天早上 8:20（北京时间）自动抓取 AI HOT 中文 AI 日报与公开条目，生成最多 10 条中文简报，并推送到群（企业微信群机器人 / 飞书群机器人）。
 
 ## 功能
 
-- RSS 聚合：可配置多个媒体/官方博客/社区源
-- AI 优先：用关键词打分 + 近期优先，科技新闻作为补充
-- 中文化：优先用百度翻译（不需要大模型）；也支持可选的 OpenAI 兼容 LLM
+- 默认数据源：AI HOT 公开 API（匿名只读，无需 token）
+- 重点主题优先：具身智能、机械臂、AI 毛绒/陪伴硬件、语音对话、大模型相关条目优先展示；不足 10 条时按 AI HOT 官方推荐补齐
+- 最多 10 条：避免群消息过长
+- 自动降级：AI HOT 接口失败、日报缺失或返回空数据时，会自动切回原来的 RSS + 翻译逻辑
+- 旧 RSS 聚合保留：设置 `DIGEST_SOURCE=rss` 可强制使用原来的 RSS + 翻译逻辑
 - 推送：
   - 企业微信群机器人：`WEIXIN_WEBHOOK`
-  - 飞书群机器人：`FEISHU_WEBHOOK_URL`（可选签名）
-- GitHub Actions：每天 08:00（北京时间）自动执行，并上传本次生成的 `out.md` 作为 artifact
+  - 飞书群机器人：`FEISHU_WEBHOOK_URL`（默认互动卡片，可选签名）
+- GitHub Actions：每天 08:20（北京时间）自动执行，并上传本次生成的 `out.md` 作为 artifact
 
 ## 目录结构
 
-- `ai_feishu_digest/feeds.json`：RSS 源、关键词、每源上限等配置
+- `ai_feishu_digest/aihot.py`：AI HOT 拉取 + 去重 + 具身智能优先排序
+- `ai_feishu_digest/feeds.json`：旧 RSS 源、关键词、每源上限等配置
 - `ai_feishu_digest/digest.py`：抓取 + 过滤/排序 + 生成 Markdown
 - `ai_feishu_digest/push.py`：根据环境变量推送到微信/飞书（有哪个推哪个，两个都有就都推）
 - `ai_feishu_digest/weixin.py`：企业微信推送（自动按字节切分，尽量保证只发一条）
-- `ai_feishu_digest/feishu.py`：飞书推送
+- `ai_feishu_digest/feishu.py`：飞书推送（默认互动卡片）
 - `.github/workflows/ai-feishu-digest.yml`：定时任务
 
 ## 本地运行
@@ -42,7 +45,11 @@ export FEISHU_WEBHOOK_URL='https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_
 # 如果飞书机器人开启了签名校验，再加：
 # export FEISHU_SIGNING_SECRET='REPLACE_ME'
 
-# 中文翻译（推荐：百度翻译，不走大模型）
+# 默认使用 AI HOT，不需要翻译密钥。
+# 如需切回旧 RSS 数据源，再打开：
+# export DIGEST_SOURCE=rss
+
+# 旧 RSS 中文翻译（仅 DIGEST_SOURCE=rss 时需要）
 export BAIDU_FANYI_APPID='REPLACE_ME'
 export BAIDU_APIKEY='REPLACE_ME'
 
@@ -58,10 +65,26 @@ python ai_feishu_digest/digest.py > ai_feishu_digest/out.md
 python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 ```
 
+## 本地预览（不推送）
+
+生成飞书卡片近似预览 + 企业微信 Markdown 预览：
+
+```bash
+python ai_feishu_digest/preview.py
+```
+
+生成后打开 `ai_feishu_digest/preview.html`。这个命令不会读取 webhook，也不会发送到群。
+
+也可以预览已有 Markdown：
+
+```bash
+python ai_feishu_digest/preview.py --markdown-file ai_feishu_digest/out.md
+```
+
 本地与 GitHub Actions 共用同一套代码逻辑：都通过环境变量读取 webhook 和翻译密钥。
 区别仅在于环境变量来源：本地来自你的 shell（`export ...`），GitHub 来自仓库 Secrets（workflow 注入到 `env`）。
 
-## GitHub Actions 配置（每天 08:00 北京时间）
+## GitHub Actions 配置（每天 08:20 北京时间）
 
 1) 确保仓库里包含：
 
@@ -72,7 +95,7 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 
 - 推企业微信群机器人：
   - `WEIXIN_WEBHOOK`
-- 中文翻译（百度翻译）：
+- 默认 AI HOT 数据源不需要翻译密钥。旧 RSS 数据源才需要中文翻译（百度翻译）：
   - `BAIDU_FANYI_APPID`
   - `BAIDU_APIKEY`
 
@@ -82,16 +105,17 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 - 需要先显式开启：`PREFER_LLM=1`
 - 再配置：`LLM_MODEL`（必填）以及 `LLM_BASE_URL/LLM_API_KEY`（按你的服务需要）
 - 兼容别名：`OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL`
-- 推飞书（可选）：
+- 推飞书（可选，默认卡片式消息）：
   - `FEISHU_WEBHOOK_URL`
   - `FEISHU_SIGNING_SECRET`（可选）
+  - `FEISHU_MESSAGE_FORMAT=post`（可选，切回旧富文本 post）
 
 3) 验证是否能在 GitHub 环境正确抓取数据：
 
 - Actions 页面手动运行一次（workflow 已支持 `workflow_dispatch`）
 - 下载本次 run 的 artifact：`ai-tech-digest`，检查 `out.md` 内容是否正常
 
-备注：部分媒体 RSS 可能对 GitHub Runner IP 有限流/403；可以通过替换源、减少源或调整频率解决。
+备注：AI HOT 官方日报约 08:00（北京时间）生成，workflow 预留到 08:20 拉取，降低“太早没数据”的概率。部分旧 RSS 媒体可能对 GitHub Runner IP 有限流/403；可以通过替换源、减少源或调整频率解决。
 
 ## GitHub 调试方法
 
@@ -102,9 +126,10 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 
 2) 再看 Actions 日志
 
-- workflow 中包含 `Debug translation` 步骤：
+- workflow 中包含 `Debug digest source` 步骤：
+  - 打印当前 `DIGEST_SOURCE` 与 `AIHOT_USER_AGENT`
   - 只打印 `BAIDU_FANYI_APPID/BAIDU_APIKEY` 是否 set（不会泄露密钥）
-  - 并做一次 `Hello world -> 你好世界` 的翻译冒烟测试
+  - 不会无条件调用百度翻译，避免旧 RSS 备用能力影响默认 AI HOT 主流程
 
 3) 推送问题排查（企业微信）
 

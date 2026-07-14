@@ -6,8 +6,9 @@ env:
 
 on:
   schedule:
-    # GitHub Actions schedule is UTC. 08:00 Beijing = 00:00 UTC.
-    - cron: "0 0 * * *"
+    # GitHub Actions schedule is UTC. 08:20 Beijing = 00:20 UTC.
+    # AI HOT daily is generated around 08:00 Beijing, so leave a small buffer.
+    - cron: "20 0 * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -40,9 +41,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r ai_feishu_digest/requirements.txt
 
-      - name: Debug translation
+      - name: Debug digest source
         run: |
-          python -c "import os,sys; sys.path.insert(0,'ai_feishu_digest'); from translate_baidu import baidu_enabled, translate_lines_zh; print('BAIDU_FANYI_APPID=' + ('set' if os.getenv('BAIDU_FANYI_APPID') else 'missing')); print('BAIDU_APIKEY=' + ('set' if os.getenv('BAIDU_APIKEY') else 'missing')); print('baidu_enabled=' + str(baidu_enabled())); print('test=' + str(translate_lines_zh(['Hello world'])[0]))"
+          python -c "import os; print('DIGEST_SOURCE=' + os.getenv('DIGEST_SOURCE', 'aihot')); print('AIHOT_USER_AGENT=' + os.getenv('AIHOT_USER_AGENT', 'default')); print('BAIDU_FANYI_APPID=' + ('set' if os.getenv('BAIDU_FANYI_APPID') else 'missing')); print('BAIDU_APIKEY=' + ('set' if os.getenv('BAIDU_APIKEY') else 'missing'))"
 
       - name: Generate digest
         run: |
