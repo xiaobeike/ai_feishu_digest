@@ -40,10 +40,23 @@ def _render_card_html(markdown: str, title: str) -> str:
 
 
 def _render_weixin_html(markdown: str) -> str:
+    title, _, items = _parse_digest_markdown(markdown)
+    articles = []
+    for item in items[:10]:
+        articles.append(
+            f"""
+            <a class="wx-article" href="{html.escape(item.url, quote=True)}" target="_blank" rel="noreferrer">
+              <div class="wx-title">{html.escape(item.title)}</div>
+              {f'<p>{html.escape(item.summary)}</p>' if item.summary else ''}
+              {f'<div class="source">{html.escape(item.source)}</div>' if item.source else ''}
+            </a>
+            """
+        )
     return f"""
     <article class="weixin-card">
-      <header>企业微信 Markdown 预览</header>
-      <pre>{html.escape(markdown)}</pre>
+      <header>企业微信图文预览</header>
+      <div class="wx-digest-title">{html.escape(title or '智能前沿日报')}</div>
+      {''.join(articles)}
     </article>
     """
 
@@ -179,6 +192,27 @@ def build_preview_html(markdown: str, *, title: str) -> str:
       color: #fff;
       background: var(--wechat);
       font-weight: 750;
+    }}
+    .wx-digest-title {{
+      padding: 14px 18px;
+      font-weight: 750;
+      border-bottom: 1px solid var(--line);
+    }}
+    .wx-article {{
+      display: block;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      color: var(--text);
+      text-decoration: none;
+    }}
+    .wx-article:last-child {{ border-bottom: 0; }}
+    .wx-title {{
+      font-weight: 720;
+      margin-bottom: 8px;
+    }}
+    .wx-article p {{
+      margin: 0 0 8px;
+      color: #333842;
     }}
     pre {{
       margin: 0;

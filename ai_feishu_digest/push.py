@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from feishu import send_feishu_post
-from weixin import send_weixin_markdown
+from weixin import send_weixin_digest
 
 
 def main() -> int:
@@ -24,7 +24,7 @@ def main() -> int:
         sent += 1
 
     if weixin_webhook:
-        send_weixin_markdown(webhook_url=weixin_webhook, markdown=md)
+        send_weixin_digest(webhook_url=weixin_webhook, markdown=md)
         sent += 1
 
     if sent == 0:

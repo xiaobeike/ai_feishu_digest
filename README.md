@@ -10,7 +10,7 @@
 - 自动降级：AI HOT 接口失败、日报缺失或返回空数据时，会自动切回原来的 RSS + 翻译逻辑
 - 旧 RSS 聚合保留：设置 `DIGEST_SOURCE=rss` 可强制使用原来的 RSS + 翻译逻辑
 - 推送：
-  - 企业微信群机器人：`WEIXIN_WEBHOOK`
+  - 企业微信群机器人：`WEIXIN_WEBHOOK`（默认图文卡片，超过 8 条会自动拆分）
   - 飞书群机器人：`FEISHU_WEBHOOK_URL`（默认互动卡片，可选签名）
 - GitHub Actions：每天 08:20（北京时间）自动执行，并上传本次生成的 `out.md` 作为 artifact
 
@@ -20,7 +20,7 @@
 - `ai_feishu_digest/feeds.json`：旧 RSS 源、关键词、每源上限等配置
 - `ai_feishu_digest/digest.py`：抓取 + 过滤/排序 + 生成 Markdown
 - `ai_feishu_digest/push.py`：根据环境变量推送到微信/飞书（有哪个推哪个，两个都有就都推）
-- `ai_feishu_digest/weixin.py`：企业微信推送（自动按字节切分，尽量保证只发一条）
+- `ai_feishu_digest/weixin.py`：企业微信推送（默认图文卡片，可切回 Markdown）
 - `ai_feishu_digest/feishu.py`：飞书推送（默认互动卡片）
 - `.github/workflows/ai-feishu-digest.yml`：定时任务
 
@@ -39,6 +39,8 @@ pip install -r ai_feishu_digest/requirements.txt
 
 # 推企业微信群机器人（二选一或都选）
 export WEIXIN_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=REPLACE_ME'
+# 可选：切回企业微信 Markdown 文本格式
+# export WEIXIN_MESSAGE_FORMAT=markdown
 
 # 推飞书群机器人（可选）
 export FEISHU_WEBHOOK_URL='https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME'
@@ -67,7 +69,7 @@ python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
 
 ## 本地预览（不推送）
 
-生成飞书卡片近似预览 + 企业微信 Markdown 预览：
+生成飞书卡片近似预览 + 企业微信图文卡片预览：
 
 ```bash
 python ai_feishu_digest/preview.py
@@ -95,6 +97,7 @@ python ai_feishu_digest/preview.py --markdown-file ai_feishu_digest/out.md
 
 - 推企业微信群机器人：
   - `WEIXIN_WEBHOOK`
+  - `WEIXIN_MESSAGE_FORMAT=markdown`（可选，切回 Markdown）
 - 默认 AI HOT 数据源不需要翻译密钥。旧 RSS 数据源才需要中文翻译（百度翻译）：
   - `BAIDU_FANYI_APPID`
   - `BAIDU_APIKEY`
