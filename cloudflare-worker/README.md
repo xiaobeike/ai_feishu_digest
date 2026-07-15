@@ -8,6 +8,7 @@
 
 - 主数据源：AI HOT 当天日报与公开条目
 - 备用数据源：AI HOT 接口失败、服务器错误、日报缺失或空数据时，自动抓取旧 RSS 源
+- 备用翻译：配置百度翻译密钥后，RSS 兜底内容会翻译成中文；未配置时保留英文
 - 优先主题：具身智能、机械臂、AI 毛绒/陪伴硬件、语音对话、大模型
 - 推送格式：
   - 飞书：互动卡片，每条都有「阅读全文」按钮
@@ -42,6 +43,13 @@ npx wrangler secret put WEIXIN_WEBHOOK
 
 ```bash
 npx wrangler secret put FEISHU_SIGNING_SECRET
+```
+
+如果希望旧 RSS 兜底内容翻译成中文，再配置百度翻译：
+
+```bash
+npx wrangler secret put BAIDU_FANYI_APPID
+npx wrangler secret put BAIDU_APIKEY
 ```
 
 可选：配置一个手动触发密钥。配置后访问 `/run` 时需要带 `Authorization: Bearer <CRON_SECRET>`：

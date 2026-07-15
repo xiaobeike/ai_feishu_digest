@@ -142,6 +142,13 @@ npx wrangler deploy
 npx wrangler secret put FEISHU_SIGNING_SECRET
 ```
 
+如果希望 AI HOT 失败时的旧 RSS 兜底内容也翻译成中文：
+
+```bash
+npx wrangler secret put BAIDU_FANYI_APPID
+npx wrangler secret put BAIDU_APIKEY
+```
+
 当前 Worker 已经具备 AI HOT 主源 + RSS 备用源：AI HOT 接口失败、服务器错误、日报缺失或空数据时，会自动切到旧 RSS 源，并继续用飞书互动卡片和企业微信图文卡片推送。详细说明见 `cloudflare-worker/README.md`。
 
 ## GitHub 调试方法

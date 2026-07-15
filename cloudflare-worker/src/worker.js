@@ -269,7 +269,8 @@ async function fetchFallbackDigest(env, limit) {
   for (const result of results) {
     if (result.status === "fulfilled") allItems.push(...result.value);
   }
-  return rankFallbackItems(allItems, limit);
+  const ranked = rankFallbackItems(allItems, limit);
+  return translateFallbackItems(env, ranked);
 }
 
 async function fetchFeedItems(env, sourceName, url, cutoffMs) {
@@ -368,6 +369,57 @@ function fallbackScore(item) {
     if (text.includes(keyword)) score += 1;
   }
   return score + Math.floor(priorityScore(item) / 100);
+}
+
+async function translateFallbackItems(env, items) {
+  const appid = clean(env.BAIDU_FANYI_APPID || env.BAIDU_TRANSLATE_APPID || env.BAIDU_APPID);
+  const key = clean(env.BAIDU_FANYI_KEY || env.BAIDU_TRANSLATE_KEY || env.BAIDU_APIKEY || env.BAIDU_API_KEY || env.BAIDU_KEY);
+  if (!appid || !key || !items.length) return items;
+
+  const titleLines = items.map((item) => item.title);
+  const summaryLines = items.map((item) => shorten(oneSentence(item.summary), 160));
+  const [titlesZh, summariesZh] = await Promise.all([
+    baiduTranslateLines(titleLines, appid, key),
+    baiduTranslateLines(summaryLines, appid, key)
+  ]);
+
+  return items.map((item, index) => ({
+    ...item,
+    title: clean(titlesZh[index]) || item.title,
+    summary: clean(summariesZh[index]) || item.summary
+  }));
+}
+
+async function baiduTranslateLines(lines, appid, key) {
+  const safeLines = lines.map((line) => clean(line).replace(/\n/g, " "));
+  if (!safeLines.some(Boolean)) return lines;
+
+  const q = safeLines.join("\n");
+  const salt = `${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`;
+  const sign = md5(`${appid}${q}${salt}${key}`);
+  const body = new URLSearchParams({
+    q,
+    from: "auto",
+    to: "zh",
+    appid,
+    salt,
+    sign
+  });
+
+  const response = await fetchWithTimeout("https://fanyi-api.baidu.com/api/trans/vip/translate", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body
+  }, 20000);
+  if (!response.ok) return lines;
+
+  const payload = await response.json().catch(() => null);
+  if (!payload || payload.error_code || !Array.isArray(payload.trans_result)) return lines;
+
+  const translated = payload.trans_result
+    .map((item) => clean(item && item.dst))
+    .filter((line) => line);
+  return translated.length === lines.length ? translated : lines;
 }
 
 function rankAndLimit(items, limit) {
@@ -672,10 +724,97 @@ function clean(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function oneSentence(value) {
+  const text = clean(value);
+  if (!text) return "";
+  const marks = ["。", "！", "？", ". ", "! ", "? ", ".", "!", "?"];
+  for (const mark of marks) {
+    const index = text.indexOf(mark);
+    if (index !== -1) return text.slice(0, index + mark.length).trim();
+  }
+  return text;
+}
+
 function shorten(value, maxLength) {
   const cleanValue = clean(value);
   if (cleanValue.length <= maxLength) return cleanValue;
   return `${cleanValue.slice(0, maxLength - 3).trim()}...`;
+}
+
+function md5(input) {
+  const bytes = new TextEncoder().encode(input);
+  const bitLength = bytes.length * 8;
+  const paddedLength = (((bytes.length + 8) >> 6) + 1) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 8, bitLength >>> 0, true);
+  view.setUint32(paddedLength - 4, Math.floor(bitLength / 0x100000000), true);
+
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+  const shifts = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+  ];
+  const table = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0);
+
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    let a = a0;
+    let b = b0;
+    let c = c0;
+    let d = d0;
+
+    for (let i = 0; i < 64; i += 1) {
+      let f;
+      let g;
+      if (i < 16) {
+        f = (b & c) | (~b & d);
+        g = i;
+      } else if (i < 32) {
+        f = (d & b) | (~d & c);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = b ^ c ^ d;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = c ^ (b | ~d);
+        g = (7 * i) % 16;
+      }
+
+      const word = view.getUint32(offset + g * 4, true);
+      const sum = (a + f + table[i] + word) >>> 0;
+      a = d;
+      d = c;
+      c = b;
+      b = (b + leftRotate(sum, shifts[i])) >>> 0;
+    }
+
+    a0 = (a0 + a) >>> 0;
+    b0 = (b0 + b) >>> 0;
+    c0 = (c0 + c) >>> 0;
+    d0 = (d0 + d) >>> 0;
+  }
+
+  return [a0, b0, c0, d0].map((word) => wordToHex(word)).join("");
+}
+
+function leftRotate(value, amount) {
+  return ((value << amount) | (value >>> (32 - amount))) >>> 0;
+}
+
+function wordToHex(word) {
+  let out = "";
+  for (let i = 0; i < 4; i += 1) {
+    out += ((word >>> (i * 8)) & 0xff).toString(16).padStart(2, "0");
+  }
+  return out;
 }
 
 function escapeLark(value) {
