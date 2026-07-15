@@ -5,10 +5,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
-  schedule:
-    # GitHub Actions schedule is UTC. 08:20 Beijing = 00:20 UTC.
-    # AI HOT daily is generated around 08:00 Beijing, so leave a small buffer.
-    - cron: "20 0 * * *"
   workflow_dispatch: {}
 
 concurrency:

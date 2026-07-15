@@ -1,0 +1,10 @@
+name = "ai-feishu-digest-worker"
+main = "src/worker.js"
+compatibility_date = "2026-07-15"
+
+[triggers]
+crons = ["20 0 * * *"]
+
+[vars]
+AIHOT_USER_AGENT = "ai-feishu-digest-worker/0.1 (+https://github.com/xiaobeike/ai_feishu_digest)"
+DIGEST_LIMIT = "10"

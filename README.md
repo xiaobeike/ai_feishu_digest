@@ -12,7 +12,7 @@
 - 推送：
   - 企业微信群机器人：`WEIXIN_WEBHOOK`（默认图文卡片，超过 8 条会自动拆分）
   - 飞书群机器人：`FEISHU_WEBHOOK_URL`（默认互动卡片，可选签名）
-- GitHub Actions：每天 08:20（北京时间）自动执行，并上传本次生成的 `out.md` 作为 artifact
+- Cloudflare Worker：每天 08:20（北京时间）自动执行；GitHub Actions 仅保留手动运行
 
 ## 目录结构
 
@@ -22,7 +22,8 @@
 - `ai_feishu_digest/push.py`：根据环境变量推送到微信/飞书（有哪个推哪个，两个都有就都推）
 - `ai_feishu_digest/weixin.py`：企业微信推送（默认图文卡片，可切回 Markdown）
 - `ai_feishu_digest/feishu.py`：飞书推送（默认互动卡片）
-- `.github/workflows/ai-feishu-digest.yml`：定时任务
+- `cloudflare-worker/`：Cloudflare Worker 定时推送版本
+- `.github/workflows/ai-feishu-digest.yml`：GitHub Actions 手动备用任务
 
 ## 本地运行
 
@@ -86,7 +87,7 @@ python ai_feishu_digest/preview.py --markdown-file ai_feishu_digest/out.md
 本地与 GitHub Actions 共用同一套代码逻辑：都通过环境变量读取 webhook 和翻译密钥。
 区别仅在于环境变量来源：本地来自你的 shell（`export ...`），GitHub 来自仓库 Secrets（workflow 注入到 `env`）。
 
-## GitHub Actions 配置（每天 08:20 北京时间）
+## GitHub Actions 配置（手动备用）
 
 1) 确保仓库里包含：
 
@@ -118,7 +119,30 @@ python ai_feishu_digest/preview.py --markdown-file ai_feishu_digest/out.md
 - Actions 页面手动运行一次（workflow 已支持 `workflow_dispatch`）
 - 下载本次 run 的 artifact：`ai-tech-digest`，检查 `out.md` 内容是否正常
 
-备注：AI HOT 官方日报约 08:00（北京时间）生成，workflow 预留到 08:20 拉取，降低“太早没数据”的概率。部分旧 RSS 媒体可能对 GitHub Runner IP 有限流/403；可以通过替换源、减少源或调整频率解决。
+备注：GitHub Actions 当前只保留 `workflow_dispatch` 手动触发，正式定时由 Cloudflare Worker 接管，避免 GitHub schedule 延迟到上午 11 点左右。部分旧 RSS 媒体可能对 GitHub Runner IP 有限流/403；可以通过替换源、减少源或调整频率解决。
+
+## Cloudflare Worker 准点方案
+
+如果 GitHub Actions 的 schedule 延迟太久，可以改用 Cloudflare Worker。Worker 不需要自有服务器，会在 Cloudflare 上每天北京时间 08:20 直接运行并推送。
+
+代码在 `cloudflare-worker/`：
+
+```bash
+cd cloudflare-worker
+npm install
+npx wrangler login
+npx wrangler secret put FEISHU_WEBHOOK_URL
+npx wrangler secret put WEIXIN_WEBHOOK
+npx wrangler deploy
+```
+
+如果飞书机器人启用了签名校验：
+
+```bash
+npx wrangler secret put FEISHU_SIGNING_SECRET
+```
+
+当前 Worker 已经具备 AI HOT 主源 + RSS 备用源：AI HOT 接口失败、服务器错误、日报缺失或空数据时，会自动切到旧 RSS 源，并继续用飞书互动卡片和企业微信图文卡片推送。详细说明见 `cloudflare-worker/README.md`。
 
 ## GitHub 调试方法
 
