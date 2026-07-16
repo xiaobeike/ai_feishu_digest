@@ -15,6 +15,7 @@ AIHOT_USER_AGENT = os.getenv(
     "AIHOT_USER_AGENT",
     "ai-feishu-digest/0.1 (+https://github.com/xiaobeike/ai_feishu_digest)",
 )
+SECTION_QUOTA = 2
 
 PRIORITY_KEYWORDS: tuple[tuple[str, int], ...] = (
     ("具身智能", 80),
@@ -127,7 +128,43 @@ def _read_url(it: DigestItem) -> str:
 
 
 def _normalized_title(title: str) -> str:
-    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", (title or "").lower())
+    s = (title or "").lower()
+    replacements = (
+        (r"apple\s+intelligence", "苹果智能"),
+        (r"apple\s*ai", "苹果智能"),
+        (r"apple\s*智能", "苹果智能"),
+        (r"苹果\s*ai", "苹果智能"),
+        (r"qwen", "千问"),
+        (r"通义千问", "千问"),
+        (r"deepseek", "深度求索"),
+        (r"chatgpt", "gpt"),
+    )
+    for pattern, repl in replacements:
+        s = re.sub(pattern, repl, s)
+    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", s)
+
+
+def _topic_tokens(title: str) -> set[str]:
+    normalized = _normalized_title(title)
+    tokens: set[str] = set()
+    aliases = {
+        "苹果智能": ("苹果智能", "苹果"),
+        "千问": ("千问",),
+        "阿里": ("阿里",),
+        "grok": ("grok",),
+        "openai": ("openai",),
+        "anthropic": ("anthropic",),
+        "claude": ("claude",),
+        "gemini": ("gemini",),
+        "深度求索": ("深度求索",),
+        "机器人": ("机器人", "机械臂", "具身"),
+        "语音": ("语音", "audio", "speech"),
+        "多模态": ("多模态", "multimodal"),
+    }
+    for token, variants in aliases.items():
+        if any(variant in normalized for variant in variants):
+            tokens.add(token)
+    return tokens
 
 
 def _bigrams(s: str) -> set[str]:
@@ -144,6 +181,9 @@ def _looks_like_same_story(a: DigestItem, b: DigestItem) -> bool:
     if not ta or not tb:
         return False
     if min(len(ta), len(tb)) >= 12 and (ta in tb or tb in ta):
+        return True
+    shared_topics = _topic_tokens(a.title) & _topic_tokens(b.title)
+    if "苹果智能" in shared_topics and len(shared_topics) >= 2:
         return True
     aa = _bigrams(ta)
     bb = _bigrams(tb)
@@ -259,6 +299,61 @@ def _merge_items(old: DigestItem, new: DigestItem) -> DigestItem:
     )
 
 
+def _append_unique(out: list[DigestItem], seen: set[str], it: DigestItem, limit: int) -> bool:
+    key = _item_key(it)
+    if key in seen or any(_looks_like_same_story(it, old) for old in out):
+        return False
+    seen.add(key)
+    out.append(it)
+    return len(out) >= limit
+
+
+def _select_section_balanced(
+    section_buckets: list[list[DigestItem]],
+    public_fillers: list[DigestItem],
+    limit: int,
+) -> list[DigestItem]:
+    ranked: list[DigestItem] = []
+    seen: set[str] = set()
+
+    for bucket in section_buckets:
+        picked = 0
+        for it in bucket:
+            before = len(ranked)
+            if _append_unique(ranked, seen, it, limit):
+                return ranked
+            if len(ranked) > before:
+                picked += 1
+            if picked >= SECTION_QUOTA:
+                break
+
+    while len(ranked) < limit:
+        progressed = False
+        for bucket in section_buckets:
+            before = len(ranked)
+            for it in bucket:
+                if _append_unique(ranked, seen, it, limit):
+                    return ranked
+                if len(ranked) > before:
+                    progressed = True
+                    break
+        if not progressed:
+            break
+
+    public_ranked = sorted(
+        public_fillers,
+        key=lambda it: (
+            it.score or 0,
+            it.published_at or datetime.min.replace(tzinfo=BJ_TZ),
+        ),
+        reverse=True,
+    )
+    for it in public_ranked:
+        if _append_unique(ranked, seen, it, limit):
+            return ranked
+    return ranked
+
+
 def fetch_aihot_digest(*, date_str: Optional[str] = None, limit: int = 10) -> tuple[dict[str, Any], list[DigestItem]]:
     if os.getenv("AIHOT_FORCE_FAIL", "").strip().lower() in ("1", "true", "yes"):
         raise RuntimeError("AIHOT_FORCE_FAIL is set")
@@ -266,19 +361,22 @@ def fetch_aihot_digest(*, date_str: Optional[str] = None, limit: int = 10) -> tu
     date_str = date_str or datetime.now(BJ_TZ).strftime("%Y-%m-%d")
     daily = _request_json(f"/api/public/daily/{date_str}")
 
-    items: list[DigestItem] = []
+    section_buckets: list[list[DigestItem]] = []
     daily_order = 0
     for section in daily.get("sections") or []:
         if not isinstance(section, dict):
             continue
         label = str(section.get("label") or "").strip()
+        bucket: list[DigestItem] = []
         for obj in section.get("items") or []:
             if isinstance(obj, dict):
                 it = _daily_item(obj, label, daily_order)
                 daily_order += 1
                 if it.title and (it.url or it.permalink):
-                    items.append(it)
+                    bucket.append(it)
+        section_buckets.append(bucket)
 
+    public_fillers: list[DigestItem] = []
     window_start = daily.get("windowStart")
     window_end_dt = _parse_dt(daily.get("windowEnd"))
     if isinstance(window_start, str) and window_start:
@@ -294,53 +392,9 @@ def fetch_aihot_digest(*, date_str: Optional[str] = None, limit: int = 10) -> tu
                 continue
             if window_end_dt and it.published_at and it.published_at > window_end_dt:
                 continue
-            items.append(it)
+            public_fillers.append(it)
 
-    deduped: dict[str, DigestItem] = {}
-    for it in items:
-        key = _item_key(it)
-        old = deduped.get(key)
-        if old is None:
-            deduped[key] = it
-            continue
-        deduped[key] = _merge_items(old, it)
-
-    values = list(deduped.values())
-    priority_items = sorted(
-        [it for it in values if _is_priority(it)],
-        key=lambda it: (
-            _priority_score(it),
-            it.score or 0,
-            it.published_at or datetime.min.replace(tzinfo=BJ_TZ),
-            -it.daily_order,
-        ),
-        reverse=True,
-    )
-    daily_recommendations = sorted(
-        [it for it in values if it.curated and not _is_priority(it)],
-        key=lambda it: it.daily_order,
-    )
-    public_fillers = sorted(
-        [it for it in values if not it.curated and not _is_priority(it)],
-        key=lambda it: (
-            it.score or 0,
-            it.published_at or datetime.min.replace(tzinfo=BJ_TZ),
-        ),
-        reverse=True,
-    )
-
-    ranked: list[DigestItem] = []
-    seen: set[str] = set()
-    for group in (priority_items, daily_recommendations, public_fillers):
-        for it in group:
-            key = _item_key(it)
-            if key in seen or any(_looks_like_same_story(it, old) for old in ranked):
-                continue
-            seen.add(key)
-            ranked.append(it)
-            if len(ranked) >= limit:
-                return daily, ranked
-    return daily, ranked
+    return daily, _select_section_balanced(section_buckets, public_fillers, limit)
 
 
 def render_aihot_markdown(*, date_str: Optional[str] = None, limit: int = 10) -> str:

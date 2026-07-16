@@ -1,6 +1,7 @@
 const AIHOT_BASE_URL = "https://aihot.virxact.com";
 const DEFAULT_LIMIT = 10;
 const FALLBACK_WINDOW_HOURS = 24;
+const SECTION_QUOTA = 2;
 
 const FALLBACK_FEEDS = [
   ["OpenAI", "https://openai.com/blog/rss.xml"],
@@ -183,16 +184,19 @@ async function fetchDigest(env, limit) {
   const date = env.DIGEST_DATE || todayInBeijing();
   const daily = await requestAihot(env, `/api/public/daily/${date}`);
 
-  const collected = [];
+  const sectionBuckets = [];
   let dailyOrder = 0;
   for (const section of daily.sections || []) {
     const label = String(section.label || "");
+    const bucket = [];
     for (const raw of section.items || []) {
       const item = dailyItem(raw, label, dailyOrder++);
-      if (item.title && item.url) collected.push(item);
+      if (item.title && item.url) bucket.push(item);
     }
+    sectionBuckets.push(bucket);
   }
 
+  const publicFillers = [];
   if (daily.windowStart) {
     const publicItems = await requestAihot(env, "/api/public/items", {
       mode: "all",
@@ -204,11 +208,11 @@ async function fetchDigest(env, limit) {
       const item = publicItem(raw);
       if (!item.title || !item.url) continue;
       if (windowEnd && item.publishedAt && item.publishedAt > windowEnd) continue;
-      collected.push(item);
+      publicFillers.push(item);
     }
   }
 
-  return { daily, items: rankAndLimit(collected, limit) };
+  return { daily, items: selectSectionBalanced(sectionBuckets, publicFillers, limit) };
 }
 
 async function requestAihot(env, path, params = {}) {
@@ -422,6 +426,50 @@ async function baiduTranslateLines(lines, appid, key) {
   return translated.length === lines.length ? translated : lines;
 }
 
+function selectSectionBalanced(sectionBuckets, publicFillers, limit) {
+  const ranked = [];
+  const seen = new Set();
+
+  for (const bucket of sectionBuckets) {
+    let picked = 0;
+    for (const item of bucket) {
+      const before = ranked.length;
+      if (appendUnique(ranked, seen, item, limit)) return ranked;
+      if (ranked.length > before) picked += 1;
+      if (picked >= SECTION_QUOTA) break;
+    }
+  }
+
+  while (ranked.length < limit) {
+    let progressed = false;
+    for (const bucket of sectionBuckets) {
+      const before = ranked.length;
+      for (const item of bucket) {
+        if (appendUnique(ranked, seen, item, limit)) return ranked;
+        if (ranked.length > before) {
+          progressed = true;
+          break;
+        }
+      }
+    }
+    if (!progressed) break;
+  }
+
+  const publicRanked = [...publicFillers].sort((a, b) => comparePublic(b, a));
+  for (const item of publicRanked) {
+    if (appendUnique(ranked, seen, item, limit)) return ranked;
+  }
+  return ranked;
+}
+
+function appendUnique(ranked, seen, item, limit) {
+  const key = itemKey(item);
+  if (seen.has(key) || ranked.some((old) => looksLikeSameStory(item, old))) return false;
+  seen.add(key);
+  ranked.push(item);
+  return ranked.length >= limit;
+}
+
 function rankAndLimit(items, limit) {
   const deduped = new Map();
   for (const item of items) {
@@ -540,6 +588,8 @@ function looksLikeSameStory(a, b) {
   const tb = normalizeTitle(b.title);
   if (!ta || !tb) return false;
   if (Math.min(ta.length, tb.length) >= 12 && (ta.includes(tb) || tb.includes(ta))) return true;
+  const sharedTopics = [...topicTokens(a.title)].filter((topic) => topicTokens(b.title).has(topic));
+  if (sharedTopics.includes("苹果智能") && sharedTopics.length >= 2) return true;
   const aa = bigrams(ta);
   const bb = bigrams(tb);
   if (!aa.size || !bb.size) return false;
@@ -710,7 +760,42 @@ function itemKey(item) {
 }
 
 function normalizeTitle(title) {
-  return String(title || "").toLowerCase().replace(/[^\da-z\u4e00-\u9fff]+/g, "");
+  let value = String(title || "").toLowerCase();
+  const replacements = [
+    [/apple\s+intelligence/g, "苹果智能"],
+    [/apple\s*ai/g, "苹果智能"],
+    [/apple\s*智能/g, "苹果智能"],
+    [/苹果\s*ai/g, "苹果智能"],
+    [/qwen/g, "千问"],
+    [/通义千问/g, "千问"],
+    [/deepseek/g, "深度求索"],
+    [/chatgpt/g, "gpt"]
+  ];
+  for (const [pattern, replacement] of replacements) value = value.replace(pattern, replacement);
+  return value.replace(/[^\da-z\u4e00-\u9fff]+/g, "");
+}
+
+function topicTokens(title) {
+  const normalized = normalizeTitle(title);
+  const aliases = [
+    ["苹果智能", ["苹果智能", "苹果"]],
+    ["千问", ["千问"]],
+    ["阿里", ["阿里"]],
+    ["grok", ["grok"]],
+    ["openai", ["openai"]],
+    ["anthropic", ["anthropic"]],
+    ["claude", ["claude"]],
+    ["gemini", ["gemini"]],
+    ["深度求索", ["深度求索"]],
+    ["机器人", ["机器人", "机械臂", "具身"]],
+    ["语音", ["语音", "audio", "speech"]],
+    ["多模态", ["多模态", "multimodal"]]
+  ];
+  const tokens = new Set();
+  for (const [token, variants] of aliases) {
+    if (variants.some((variant) => normalized.includes(variant))) tokens.add(token);
+  }
+  return tokens;
 }
 
 function bigrams(value) {
