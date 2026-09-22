@@ -1,7 +1,18 @@
-const AIHOT_BASE_URL = "https://aihot.virxact.com";
+const AIHOT_BASE_URL = "https://aihot.news";
 const DEFAULT_LIMIT = 10;
 const FALLBACK_WINDOW_HOURS = 24;
 const SECTION_QUOTA = 2;
+const SELECTED_POOL_LIMIT = 100;
+const SELECTED_SOURCE_CAP = 3;
+const AIHOT_TIMEOUT_MS = 20000;
+
+// Shown in the card footer when the curated daily report was not available, so a
+// degraded digest is never mistaken for the normal one.
+const SOURCE_NOTES = {
+  "aihot-daily": "",
+  "aihot-selected": "今日日报尚未发布，本条为 AIHOT 精选池（最近 24 小时）",
+  "rss-fallback": "AIHOT 接口暂不可用，本条来自备用 RSS 源"
+};
 
 const FALLBACK_FEEDS = [
   ["OpenAI", "https://openai.com/blog/rss.xml"],
@@ -110,7 +121,9 @@ const PRIORITY_KEYWORDS = [
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runDigest(env, { trigger: "scheduled", cron: event.cron }));
+    ctx.waitUntil(
+      runDigest(env, { trigger: "scheduled", cron: event.cron }, { dryRun: isTruthy(env.DRY_RUN) })
+    );
   },
 
   async fetch(request, env) {
@@ -128,91 +141,155 @@ export default {
         }
       }
 
-      const result = await runDigest(env, { trigger: "manual" });
-      return jsonResponse(result);
+      // dry=1 builds the full message and returns it without calling any webhook.
+      const dryRun = isTruthy(url.searchParams.get("dry")) || isTruthy(env.DRY_RUN);
+      try {
+        return jsonResponse(await runDigest(env, { trigger: "manual" }, { dryRun }));
+      } catch (error) {
+        return jsonResponse({ ok: false, error: errorMessage(error) }, 500);
+      }
     }
 
-    return jsonResponse({ ok: true, endpoints: ["/health", "/run"] });
+    return jsonResponse({ ok: true, endpoints: ["/health", "/run", "/run?dry=1"] });
   }
 };
 
-async function runDigest(env, meta = {}) {
+async function runDigest(env, meta = {}, options = {}) {
+  const dryRun = Boolean(options.dryRun);
   const limit = clampInt(env.DIGEST_LIMIT, 1, 10, DEFAULT_LIMIT);
-  const { daily, items, source, fallbackReason } = await fetchDigestWithFallback(env, limit);
+  const { date, items, source, fallbackReason } = await fetchDigestWithFallback(env, limit);
   if (!items.length) {
     throw new Error("No digest items found");
   }
 
-  const title = `智能前沿日报（${daily.date || todayInBeijing()}）`;
-  const feishuResult = env.FEISHU_WEBHOOK_URL
-    ? await sendFeishu(env, title, items)
-    : { skipped: true };
-  const weixinResult = env.WEIXIN_WEBHOOK
-    ? await sendWeixin(env, title, items)
-    : { skipped: true };
+  const title = `智能前沿日报（${date || todayInBeijing()}）`;
+  const note = SOURCE_NOTES[source] || "";
 
-  return {
+  const feishuPayload = env.FEISHU_WEBHOOK_URL ? buildFeishuPayload(title, items, note) : null;
+  const weixinPayloads = env.WEIXIN_WEBHOOK ? buildWeixinPayloads(items, note) : null;
+
+  const itemTitles = items.map((item) => item.title);
+  const summary = {
     ok: true,
     trigger: meta.trigger || "unknown",
     cron: meta.cron || null,
     source,
     fallbackReason,
     title,
+    date,
     count: items.length,
-    feishu: feishuResult,
-    weixin: weixinResult
+    itemTitles
+  };
+  console.log(JSON.stringify({ source, fallbackReason, title, date, count: items.length, titles: itemTitles }));
+
+  if (dryRun) {
+    // Sign it too, so the returned payload is exactly what production would post.
+    if (feishuPayload) await signFeishu(env, feishuPayload);
+    return {
+      ...summary,
+      dryRun: true,
+      feishu: feishuPayload
+        ? { skipped: false, dryRun: true, payload: feishuPayload }
+        : { skipped: true },
+      weixin: weixinPayloads
+        ? { skipped: false, dryRun: true, payloads: weixinPayloads }
+        : { skipped: true }
+    };
+  }
+
+  const feishuResult = feishuPayload ? await sendFeishu(env, feishuPayload) : { skipped: true };
+  const weixinResult = weixinPayloads ? await sendWeixin(env, weixinPayloads) : { skipped: true };
+
+  return { ...summary, feishu: feishuResult, weixin: weixinResult };
+}
+
+// The curated daily report is the intended source, but AIHOT publishes it around
+// 08:00 Beijing and it can run late. Every step below stays Chinese, so a late
+// publish degrades the digest instead of turning it English.
+async function fetchDigestWithFallback(env, limit) {
+  const requestedDate = env.DIGEST_DATE || todayInBeijing();
+  const reasons = [];
+
+  const daily = await tryFetchDaily(env, requestedDate, limit, reasons);
+  if (daily) return { ...daily, fallbackReason: "" };
+
+  // The report may have landed while the first request was in flight.
+  const latest = await tryFetchDaily(env, null, limit, reasons);
+  if (latest && latest.date === requestedDate) return { ...latest, fallbackReason: reasons.join("; ") };
+
+  const pool = await tryFetchSelectedPool(env, limit, reasons);
+  if (pool) return { ...pool, fallbackReason: reasons.join("; ") };
+
+  const items = await fetchFallbackDigest(env, limit);
+  return {
+    date: requestedDate,
+    items,
+    source: "rss-fallback",
+    fallbackReason: reasons.join("; ")
   };
 }
 
-async function fetchDigestWithFallback(env, limit) {
+async function tryFetchDaily(env, date, limit, reasons) {
+  const label = date || "latest";
   try {
-    const result = await fetchDigest(env, limit);
-    if (result.items.length) return { ...result, source: "aihot", fallbackReason: "" };
-    throw new Error("AI HOT returned no items");
+    const report = await fetchDailyReport(env, date);
+    const items = selectSectionBalanced(sectionBuckets(report), [], limit);
+    if (!items.length) {
+      reasons.push(`AI HOT daily ${label} has no usable items`);
+      return null;
+    }
+    return { date: report.date || date || todayInBeijing(), items, source: "aihot-daily" };
   } catch (error) {
-    const items = await fetchFallbackDigest(env, limit);
-    return {
-      daily: { date: todayInBeijing() },
-      items,
-      source: "rss-fallback",
-      fallbackReason: error instanceof Error ? error.message : String(error)
-    };
+    reasons.push(`AI HOT daily ${label} failed: ${errorMessage(error)}`);
+    return null;
   }
 }
 
-async function fetchDigest(env, limit) {
-  const date = env.DIGEST_DATE || todayInBeijing();
-  const daily = await requestAihot(env, `/api/public/daily/${date}`);
+async function tryFetchSelectedPool(env, limit, reasons) {
+  try {
+    const payload = await requestAihot(env, "/api/v1/items", {
+      mode: "selected",
+      window: "24h",
+      limit: String(SELECTED_POOL_LIMIT)
+    });
+    const candidates = (payload.items || [])
+      .map(selectedPoolItem)
+      .filter((item) => item.title && item.url);
+    const items = rankSelectedPool(candidates, limit);
+    if (!items.length) {
+      reasons.push("AI HOT selected pool has no usable items");
+      return null;
+    }
+    return { date: todayInBeijing(), items, source: "aihot-selected" };
+  } catch (error) {
+    reasons.push(`AI HOT selected pool failed: ${errorMessage(error)}`);
+    return null;
+  }
+}
 
-  const sectionBuckets = [];
+async function fetchDailyReport(env, date) {
+  const path = date ? `/api/v1/dailies/${encodeURIComponent(date)}` : "/api/v1/dailies/latest";
+  const payload = await requestAihot(env, path);
+  const report = payload ? payload.report : null;
+  if (!report || typeof report !== "object") {
+    throw new Error(`AI HOT ${path} returned no report`);
+  }
+  return report;
+}
+
+function sectionBuckets(report) {
+  const buckets = [];
   let dailyOrder = 0;
-  for (const section of daily.sections || []) {
+  for (const section of report.sections || []) {
     const label = String(section.label || "");
     const bucket = [];
     for (const raw of section.items || []) {
       const item = dailyItem(raw, label, dailyOrder++);
       if (item.title && item.url) bucket.push(item);
     }
-    sectionBuckets.push(bucket);
+    buckets.push(bucket);
   }
-
-  const publicFillers = [];
-  if (daily.windowStart) {
-    const publicItems = await requestAihot(env, "/api/public/items", {
-      mode: "all",
-      since: daily.windowStart,
-      take: "100"
-    });
-    const windowEnd = parseDate(daily.windowEnd);
-    for (const raw of publicItems.items || []) {
-      const item = publicItem(raw);
-      if (!item.title || !item.url) continue;
-      if (windowEnd && item.publishedAt && item.publishedAt > windowEnd) continue;
-      publicFillers.push(item);
-    }
-  }
-
-  return { daily, items: selectSectionBalanced(sectionBuckets, publicFillers, limit) };
+  return buckets;
 }
 
 async function requestAihot(env, path, params = {}) {
@@ -220,25 +297,41 @@ async function requestAihot(env, path, params = {}) {
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
   }
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     headers: {
       "accept": "application/json",
       "user-agent": env.AIHOT_USER_AGENT || "ai-feishu-digest-worker/0.1"
     }
-  });
+  }, AIHOT_TIMEOUT_MS);
   if (!response.ok) {
-    throw new Error(`AI HOT ${path} failed: ${response.status}`);
+    throw new Error(`AI HOT ${path} failed: ${response.status}${await problemDetail(response)}`);
   }
   return response.json();
 }
 
+async function problemDetail(response) {
+  const payload = await response.json().catch(() => null);
+  const detail = payload ? clean(payload.detail || payload.title || payload.code) : "";
+  return detail ? ` (${detail})` : "";
+}
+
+function linksOf(raw) {
+  const links = raw && typeof raw.links === "object" && raw.links ? raw.links : {};
+  return { original: clean(links.original), aihot: clean(links.aihot) };
+}
+
+function sourceNameOf(raw) {
+  const source = raw && typeof raw.source === "object" && raw.source ? raw.source : {};
+  return clean(source.name);
+}
+
 function dailyItem(raw, sectionLabel, dailyOrder) {
-  const sourceUrl = clean(raw.sourceUrl);
+  const links = linksOf(raw);
   return {
     title: clean(raw.title),
     summary: clean(raw.summary),
-    url: sourceUrl || clean(raw.permalink),
-    sourceName: clean(raw.sourceName),
+    url: links.original || links.aihot,
+    sourceName: sourceNameOf(raw),
     category: "",
     sectionLabel,
     score: null,
@@ -248,19 +341,60 @@ function dailyItem(raw, sectionLabel, dailyOrder) {
   };
 }
 
-function publicItem(raw) {
+function selectedPoolItem(raw) {
+  const links = linksOf(raw);
   return {
     title: clean(raw.title),
     summary: clean(raw.summary),
-    url: clean(raw.url) || clean(raw.permalink),
-    sourceName: clean(raw.source),
+    url: links.original || links.aihot,
+    sourceName: sourceNameOf(raw),
     category: clean(raw.category),
     sectionLabel: "",
-    score: Number.isInteger(raw.score) ? raw.score : null,
+    score: Number.isFinite(raw.score) ? raw.score : null,
     publishedAt: parseDate(raw.publishedAt),
     curated: Boolean(raw.selected),
     dailyOrder: 9999
   };
+}
+
+function rankSelectedPool(items, limit) {
+  const deduped = new Map();
+  for (const item of items) {
+    const key = itemKey(item);
+    const old = deduped.get(key);
+    if (!old) {
+      deduped.set(key, item);
+      continue;
+    }
+    deduped.set(key, mergeItems(old, item));
+  }
+
+  const values = [...deduped.values()];
+  const priority = values.filter(isPriority).sort((a, b) => comparePriority(b, a));
+  const rest = values.filter((item) => !isPriority(item)).sort((a, b) => comparePublic(b, a));
+
+  const selected = [];
+  const counts = new Map();
+  const add = (item) => {
+    if (selected.some((old) => looksLikeSameStory(item, old))) return;
+    const count = counts.get(item.sourceName) || 0;
+    if (count >= SELECTED_SOURCE_CAP) return;
+    counts.set(item.sourceName, count + 1);
+    selected.push(item);
+  };
+
+  for (const item of [...priority, ...rest]) {
+    add(item);
+    if (selected.length >= limit) return selected;
+  }
+
+  // A per-source cap can starve the result on a narrow news day; fill the rest.
+  for (const item of [...priority, ...rest]) {
+    if (selected.length >= limit) break;
+    if (selected.some((old) => looksLikeSameStory(item, old))) continue;
+    selected.push(item);
+  }
+  return selected;
 }
 
 async function fetchFallbackDigest(env, limit) {
@@ -292,7 +426,57 @@ async function fetchFeedItems(env, sourceName, url, cutoffMs) {
     .map((item) => ({ ...item, curated: false, dailyOrder: 9999 }));
 }
 
+function isPrivateIpv4(host) {
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  const octets = parts.map((part) => (/^\d{1,3}$/.test(part) ? Number(part) : NaN));
+  if (octets.some((value) => !Number.isInteger(value) || value > 255)) return false;
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && (b === 0 || b === 168)) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+function isPrivateHost(host) {
+  const name = String(host || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!name) return true;
+  if (name === "localhost" || name.endsWith(".localhost")) return true;
+  if ([".local", ".internal", ".home.arpa"].some((suffix) => name.endsWith(suffix))) return true;
+  if (name.includes(":")) {
+    if (name === "::" || name === "::1") return true;
+    if (/^f[cd]/.test(name) || /^fe[89ab]/.test(name)) return true;
+    const mapped = name.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    return mapped ? isPrivateIpv4(mapped[1]) : false;
+  }
+  return isPrivateIpv4(name);
+}
+
+function assertPublicHttpUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Unsupported URL scheme: ${parsed.protocol}`);
+  }
+  if (isPrivateHost(parsed.hostname)) {
+    throw new Error(`Refusing to request non-public host: ${parsed.hostname}`);
+  }
+  return parsed;
+}
+
 async function fetchWithTimeout(url, init, timeoutMs) {
+  assertPublicHttpUrl(url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -470,40 +654,6 @@ function appendUnique(ranked, seen, item, limit) {
   return ranked.length >= limit;
 }
 
-function rankAndLimit(items, limit) {
-  const deduped = new Map();
-  for (const item of items) {
-    const key = itemKey(item);
-    const old = deduped.get(key);
-    if (!old) {
-      deduped.set(key, item);
-      continue;
-    }
-    deduped.set(key, mergeItems(old, item));
-  }
-
-  const values = [...deduped.values()];
-  const priority = values
-    .filter(isPriority)
-    .sort((a, b) => comparePriority(b, a));
-  const daily = values
-    .filter((item) => item.curated && !isPriority(item))
-    .sort((a, b) => a.dailyOrder - b.dailyOrder);
-  const publicFillers = values
-    .filter((item) => !item.curated && !isPriority(item))
-    .sort((a, b) => comparePublic(b, a));
-
-  const ranked = [];
-  for (const group of [priority, daily, publicFillers]) {
-    for (const item of group) {
-      if (ranked.some((old) => looksLikeSameStory(item, old))) continue;
-      ranked.push(item);
-      if (ranked.length >= limit) return ranked;
-    }
-  }
-  return ranked;
-}
-
 function comparePriority(a, b) {
   return (
     priorityScore(a) - priorityScore(b) ||
@@ -598,8 +748,17 @@ function looksLikeSameStory(a, b) {
   return intersection / union >= 0.42;
 }
 
-async function sendFeishu(env, title, items) {
-  const payload = {
+function buildFeishuPayload(title, items, note) {
+  const elements = buildFeishuElements(items);
+  if (note) {
+    elements.push({ tag: "hr" });
+    elements.push({
+      tag: "div",
+      text: { tag: "lark_md", content: `<font color='grey'>${escapeLark(note)}</font>` }
+    });
+  }
+
+  return {
     msg_type: "interactive",
     card: {
       config: { wide_screen_mode: true },
@@ -607,10 +766,12 @@ async function sendFeishu(env, title, items) {
         template: "blue",
         title: { tag: "plain_text", content: title }
       },
-      elements: buildFeishuElements(items)
+      elements
     }
   };
+}
 
+async function sendFeishu(env, payload) {
   await signFeishu(env, payload);
   return postJson(env.FEISHU_WEBHOOK_URL, payload, "feishu");
 }
@@ -658,7 +819,7 @@ async function signFeishu(env, payload) {
   payload.sign = base64Encode(signature);
 }
 
-async function sendWeixin(env, title, items) {
+function buildWeixinPayloads(items, note) {
   const articles = items
     .filter((item) => item.url)
     .slice(0, 10)
@@ -669,15 +830,24 @@ async function sendWeixin(env, title, items) {
       picurl: ""
     }));
 
-  const chunks = chunk(articles, 8);
-  const results = [];
-  for (const group of chunks) {
-    results.push(await postJson(env.WEIXIN_WEBHOOK, { msgtype: "news", news: { articles: group } }, "weixin"));
+  if (note && articles.length) {
+    const last = articles[articles.length - 1];
+    last.description = [last.description, shorten(note, 60)].filter(Boolean).join("\n");
   }
-  return { ok: true, chunks: results.length, title };
+
+  return chunk(articles, 8).map((group) => ({ msgtype: "news", news: { articles: group } }));
+}
+
+async function sendWeixin(env, payloads) {
+  const results = [];
+  for (const payload of payloads) {
+    results.push(await postJson(env.WEIXIN_WEBHOOK, payload, "weixin"));
+  }
+  return { ok: true, chunks: results.length };
 }
 
 async function postJson(url, payload, kind) {
+  assertPublicHttpUrl(url);
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -916,6 +1086,14 @@ function clampInt(value, min, max, fallback) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.min(max, parsed));
+}
+
+function isTruthy(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function base64Encode(buffer) {

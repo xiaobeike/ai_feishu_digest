@@ -1,10 +1,12 @@
 import json
 import os
 import sys
+from urllib.parse import urlsplit
 
 import requests
 
 from feishu import _parse_digest_markdown
+from net import assert_public_http_url, webhook_hosts
 
 
 def _utf8_len(s: str) -> int:
@@ -54,7 +56,19 @@ def _chunk_text_utf8(s: str, max_bytes: int) -> list[str]:
 
 
 def _post_weixin_payload(webhook_url: str, payload: dict) -> None:
-    r = requests.post(webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=30)
+    parts = urlsplit((webhook_url or "").strip())
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in webhook_hosts():
+        raise RuntimeError(f"Refusing to post to unexpected webhook host: {parts.hostname or '(none)'}")
+    assert_public_http_url(webhook_url)
+
+    # Redirects stay off: following one would leave the allowed host.
+    r = requests.post(
+        webhook_url,
+        data=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+        timeout=30,
+        allow_redirects=False,
+    )
     r.raise_for_status()
 
     try:
@@ -87,7 +101,7 @@ def _chunk_list(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def send_weixin_news(webhook_url: str, markdown: str) -> None:
+def build_weixin_news_payloads(markdown: str) -> list[dict]:
     title, _, items = _parse_digest_markdown(markdown)
     articles = []
     for item in items[:10]:
@@ -109,16 +123,26 @@ def send_weixin_news(webhook_url: str, markdown: str) -> None:
         )
 
     if not articles:
+        return []
+
+    payloads = []
+    for group in _chunk_list(articles, 8):
+        if len(group) == 1 and title:
+            group[0]["description"] = f"{title}\n{group[0].get('description', '')}".strip()
+        payloads.append({"msgtype": "news", "news": {"articles": group}})
+    return payloads
+
+
+def send_weixin_news(webhook_url: str, markdown: str) -> None:
+    debug = os.environ.get("PUSH_DEBUG", "").strip() in ("1", "true", "TRUE", "yes", "YES")
+    payloads = build_weixin_news_payloads(markdown)
+    if not payloads:
         send_weixin_markdown(webhook_url=webhook_url, markdown=markdown)
         return
 
-    debug = os.environ.get("PUSH_DEBUG", "").strip() in ("1", "true", "TRUE", "yes", "YES")
     sent_any = False
     try:
-        for idx, group in enumerate(_chunk_list(articles, 8), start=1):
-            if len(group) == 1 and title:
-                group[0]["description"] = f"{title}\n{group[0].get('description', '')}".strip()
-            payload = {"msgtype": "news", "news": {"articles": group}}
+        for idx, payload in enumerate(payloads, start=1):
             _post_weixin_payload(webhook_url, payload)
             sent_any = True
             if debug:

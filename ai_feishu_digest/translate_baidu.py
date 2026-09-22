@@ -1,11 +1,18 @@
 import hashlib
 import os
-import random
+import secrets
 import sys
 import time
 from typing import List
+from urllib.parse import urlsplit
 
 import requests
+
+from net import assert_public_http_url
+
+
+BAIDU_TRANSLATE_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
+ALLOWED_BAIDU_HOSTS = ("fanyi-api.baidu.com",)
 
 
 def _env_first(*keys: str) -> str:
@@ -41,10 +48,15 @@ def translate_lines_zh(lines: List[str], *, timeout_s: int = 20) -> List[str]:
     safe_lines = [(s or "").replace("\n", " ").strip() for s in lines]
     q = "\n".join(safe_lines)
 
-    salt = str(int(time.time())) + str(random.randint(1000, 9999))
+    salt = f"{int(time.time())}{secrets.randbelow(9000) + 1000}"
     sign = _sign(appid, q, salt, key)
 
-    url = "https://fanyi-api.baidu.com/api/trans/vip/translate"
+    url = BAIDU_TRANSLATE_URL
+    parts = urlsplit(url)
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in ALLOWED_BAIDU_HOSTS:
+        raise RuntimeError(f"Refusing to request unexpected translate host: {parts.hostname or '(none)'}")
+    assert_public_http_url(url)
+
     data = {
         "q": q,
         "from": "auto",
@@ -54,7 +66,8 @@ def translate_lines_zh(lines: List[str], *, timeout_s: int = 20) -> List[str]:
         "sign": sign,
     }
 
-    r = requests.post(url, data=data, timeout=timeout_s)
+    # Redirects stay off: following one would leave the allowed host.
+    r = requests.post(url, data=data, timeout=timeout_s, allow_redirects=False)
     r.raise_for_status()
     payload = r.json()
 

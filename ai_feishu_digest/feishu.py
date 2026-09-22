@@ -6,8 +6,11 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import requests
+
+from net import assert_public_http_url, webhook_hosts
 
 
 @dataclass
@@ -190,8 +193,20 @@ def _card_payload(title: str, markdown: str) -> dict:
 
 
 def _post_webhook(webhook_url: str, payload: dict) -> None:
+    parts = urlsplit((webhook_url or "").strip())
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in webhook_hosts():
+        raise RuntimeError(f"Refusing to post to unexpected webhook host: {parts.hostname or '(none)'}")
+    assert_public_http_url(webhook_url)
+
     _feishu_sign(payload)
-    r = requests.post(webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=30)
+    # Redirects stay off: following one would leave the allowed host.
+    r = requests.post(
+        webhook_url,
+        data=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+        timeout=30,
+        allow_redirects=False,
+    )
     r.raise_for_status()
     try:
         resp = r.json()
@@ -203,10 +218,12 @@ def _post_webhook(webhook_url: str, payload: dict) -> None:
             raise RuntimeError(f"Feishu webhook send failed: {resp}")
 
 
-def send_feishu_post(webhook_url: str, title: str, markdown: str) -> None:
+def build_feishu_payload(title: str, markdown: str) -> dict:
     message_format = os.getenv("FEISHU_MESSAGE_FORMAT", "card").strip().lower()
     if message_format in ("post", "rich_text", "richtext"):
-        payload = _post_payload(title, markdown)
-    else:
-        payload = _card_payload(title, markdown)
-    _post_webhook(webhook_url, payload)
+        return _post_payload(title, markdown)
+    return _card_payload(title, markdown)
+
+
+def send_feishu_post(webhook_url: str, title: str, markdown: str) -> None:
+    _post_webhook(webhook_url, build_feishu_payload(title, markdown))

@@ -3,7 +3,12 @@ main = "src/worker.js"
 compatibility_date = "2026-07-15"
 
 [triggers]
-crons = ["20 0 * * *"]
+# 01:20 UTC = 09:20 Beijing. AI HOT normally publishes the daily report at
+# 08:00-08:02 Beijing, and on 2026-09-22 it ran to 08:59 — the old 08:20 trigger
+# fired first, found no report, and fell through to the English RSS fallback.
+# 09:20 leaves 80 minutes of slack. If the report is still missing, the worker
+# now degrades to AI HOT's own Chinese selected pool instead of English feeds.
+crons = ["20 1 * * *"]
 
 [vars]
 AIHOT_USER_AGENT = "ai-feishu-digest-worker/0.1 (+https://github.com/xiaobeike/ai_feishu_digest)"

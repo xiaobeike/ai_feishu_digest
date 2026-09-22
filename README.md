@@ -1,28 +1,34 @@
 # ai_feishu_digest
 
-每天早上 8:20（北京时间）自动抓取 AI HOT 中文 AI 日报，生成最多 10 条中文简报，并推送到群（企业微信群机器人 / 飞书群机器人）。
+每天早上 9:20（北京时间）自动抓取 AI HOT 中文 AI 日报，生成最多 10 条中文简报，并推送到群（企业微信群机器人 / 飞书群机器人）。
 
 ## 功能
 
-- 默认数据源：AI HOT 公开 API（匿名只读，无需 token）
+- 默认数据源：AI HOT 公开 API v1（`/api/v1/*`，匿名只读，无需 token）
 - 栏目均衡：按 AI HOT 日报栏目顺序，每个栏目先取前 2 条；栏目不足时从其他栏目剩余条目补齐
 - 去重：同 URL、标题包含关系或标题相似度较高的条目只保留一条
 - 最多 10 条：避免群消息过长
-- 自动降级：AI HOT 接口失败、日报缺失或返回空数据时，会自动切回原来的 RSS + 翻译逻辑
+- 分级降级（**每一级都保持中文**）：
+  1. 当天 AI HOT 日报（`/api/v1/dailies/{date}`）
+  2. 当天日报尚未发布时，改用 AI HOT 精选池（`/api/v1/items?mode=selected&window=24h`）
+  3. 前两级都不可用时，才切到旧 RSS 源（英文，需百度翻译才变中文）
+  降级到 2、3 级时，卡片会带一行灰色说明，避免把降级内容误认为正常日报。
 - 旧 RSS 聚合保留：设置 `DIGEST_SOURCE=rss` 可强制使用原来的 RSS + 翻译逻辑
 - 推送：
   - 企业微信群机器人：`WEIXIN_WEBHOOK`（默认图文卡片，超过 8 条会自动拆分）
   - 飞书群机器人：`FEISHU_WEBHOOK_URL`（默认互动卡片，可选签名）
-- Cloudflare Worker：每天 08:20（北京时间）自动执行；GitHub Actions 仅保留手动运行
+- Cloudflare Worker：每天 09:20（北京时间）自动执行；GitHub Actions 仅保留手动运行
 
 ## 目录结构
 
-- `ai_feishu_digest/aihot.py`：AI HOT 拉取 + 栏目均衡选择 + 去重
+- `ai_feishu_digest/aihot.py`：AI HOT v1 拉取 + 分级降级 + 栏目均衡选择 + 去重
+- `ai_feishu_digest/net.py`：出站 URL 校验（仅 http/https、拒绝内网地址、webhook 主机白名单）
 - `ai_feishu_digest/feeds.json`：旧 RSS 源、关键词、每源上限等配置
 - `ai_feishu_digest/digest.py`：抓取 + 过滤/排序 + 生成 Markdown
 - `ai_feishu_digest/push.py`：根据环境变量推送到微信/飞书（有哪个推哪个，两个都有就都推）
 - `ai_feishu_digest/weixin.py`：企业微信推送（默认图文卡片，可切回 Markdown）
 - `ai_feishu_digest/feishu.py`：飞书推送（默认互动卡片）
+- `ai_feishu_digest/test_smoke.py`：冒烟测试（拦截全部 webhook，不会真的推送）
 - `cloudflare-worker/`：Cloudflare Worker 定时推送版本
 - `.github/workflows/ai-feishu-digest.yml`：GitHub Actions 手动备用任务
 
@@ -64,6 +70,8 @@ export BAIDU_APIKEY='REPLACE_ME'
 # export LLM_BASE_URL='https://api.openai.com'          # 或 OPENAI_BASE_URL
 # export LLM_API_KEY='REPLACE_ME'                      # 或 OPENAI_API_KEY
 # export LLM_MODEL='gpt-4o-mini'                       # 或 OPENAI_MODEL
+# 如果 LLM 服务在本机或内网（Ollama / vLLM / llama.cpp），需要显式放行：
+# export LLM_ALLOW_PRIVATE_HOSTS=1
 
 python ai_feishu_digest/digest.py > ai_feishu_digest/out.md
 python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md
@@ -87,6 +95,44 @@ python ai_feishu_digest/preview.py --markdown-file ai_feishu_digest/out.md
 
 本地与 GitHub Actions 共用同一套代码逻辑：都通过环境变量读取 webhook 和翻译密钥。
 区别仅在于环境变量来源：本地来自你的 shell（`export ...`），GitHub 来自仓库 Secrets（workflow 注入到 `env`）。
+
+## 测试（不会真的推送）
+
+冒烟测试会拦截所有 webhook 调用，只验证抓取、降级、卡片构造和 URL 校验，不会发到任何群：
+
+```bash
+# Python 链路
+.venv/bin/python ai_feishu_digest/test_smoke.py
+
+# Cloudflare Worker 链路
+cd cloudflare-worker && npm test
+```
+
+只想看会推送什么内容、不真的发出去：
+
+```bash
+# 打印飞书卡片和企业微信图文的实际构造结果
+python ai_feishu_digest/push.py --markdown-file ai_feishu_digest/out.md --dry-run
+```
+
+Worker 也支持 dry run：访问 `/run?dry=1` 会返回完整 payload 而不调用任何 webhook。
+需要让定时任务本身空跑时，设置变量 `DRY_RUN=1`。
+
+## 出站请求安全校验
+
+所有出站请求在发出前都会校验：只允许 http/https、拒绝 localhost/环回/私有/链路本地/保留地址、禁止跟随重定向；AI HOT 路径固定在 `aihot.news`，百度翻译固定在 `fanyi-api.baidu.com`。
+
+webhook 主机默认白名单为 `open.feishu.cn`、`open.larksuite.com`、`qyapi.weixin.qq.com`。如果你用自建代理或其它域名，需要显式放行：
+
+```bash
+export WEBHOOK_HOST_ALLOWLIST='your-relay.example.com'
+```
+
+LLM 接口（`LLM_BASE_URL`）默认必须是 https 且指向公网地址。指向本机或内网服务时需要显式放行：
+
+```bash
+export LLM_ALLOW_PRIVATE_HOSTS=1
+```
 
 ## GitHub Actions 配置（手动备用）
 
@@ -124,7 +170,9 @@ python ai_feishu_digest/preview.py --markdown-file ai_feishu_digest/out.md
 
 ## Cloudflare Worker 准点方案
 
-如果 GitHub Actions 的 schedule 延迟太久，可以改用 Cloudflare Worker。Worker 不需要自有服务器，会在 Cloudflare 上每天北京时间 08:20 直接运行并推送。
+如果 GitHub Actions 的 schedule 延迟太久，可以改用 Cloudflare Worker。Worker 不需要自有服务器，会在 Cloudflare 上每天北京时间 09:20 直接运行并推送。
+
+> 为什么是 09:20：AI HOT 日报按设计在北京时间 08:00 发布，但偶尔会晚（2026-09-22 晚到 08:59）。旧配置 08:20 触发时日报还没发布，接口返回 404，于是整条推送降级成了英文 RSS。现在触发时间留出 80 分钟余量，并且降级链会优先用中文的 AI HOT 精选池。
 
 代码在 `cloudflare-worker/`：
 
@@ -143,14 +191,14 @@ npx wrangler deploy
 npx wrangler secret put FEISHU_SIGNING_SECRET
 ```
 
-如果希望 AI HOT 失败时的旧 RSS 兜底内容也翻译成中文：
+百度翻译只在最后一级（旧 RSS 兜底）用到。只有你希望连英文 RSS 兜底也翻译成中文时才需要配置；正常情况下降级会停在中文的 AI HOT 精选池，用不到它：
 
 ```bash
 npx wrangler secret put BAIDU_FANYI_APPID
 npx wrangler secret put BAIDU_APIKEY
 ```
 
-当前 Worker 已经具备 AI HOT 主源 + RSS 备用源：AI HOT 接口失败、服务器错误、日报缺失或空数据时，会自动切到旧 RSS 源，并继续用飞书互动卡片和企业微信图文卡片推送。详细说明见 `cloudflare-worker/README.md`。
+当前 Worker 的分级降级顺序是：当天 AI HOT 日报 → AI HOT 精选池（中文）→ 旧 RSS 源（英文 + 百度翻译）。详细说明见 `cloudflare-worker/README.md`。
 
 ## GitHub 调试方法
 

@@ -2,8 +2,11 @@ import json
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import requests
+
+from net import assert_public_http_url
 
 
 def _env_first(*keys: str) -> str:
@@ -83,7 +86,23 @@ def zh_title_and_summary(
         headers["Authorization"] = f"Bearer {api_key}"
 
     url = _chat_completions_url(base_url)
-    r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout_s)
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        raise RuntimeError(f"Refusing to request unexpected LLM url: {url}")
+
+    # A local OpenAI-compatible server (Ollama, vLLM, llama.cpp) is a legitimate
+    # target, but it must be opted into explicitly rather than reached by default.
+    allow_private = _env_first("LLM_ALLOW_PRIVATE_HOSTS").lower() in ("1", "true", "yes")
+    if not allow_private:
+        if parts.scheme != "https":
+            raise RuntimeError(
+                f"LLM base url must use https: {url} (set LLM_ALLOW_PRIVATE_HOSTS=1 for a local server)"
+            )
+        assert_public_http_url(url)
+
+    # Redirects stay off: following one would leave the configured host.
+    r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout_s, allow_redirects=False)
     r.raise_for_status()
     data = r.json()
 
