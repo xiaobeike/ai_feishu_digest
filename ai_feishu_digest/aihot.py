@@ -1,12 +1,15 @@
+import calendar
+import html
 import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+import feedparser
 import requests
 
 from net import assert_public_http_url
@@ -27,6 +30,7 @@ SELECTED_SOURCE_CAP = 3
 SOURCE_NOTES = {
     "aihot-daily": "",
     "aihot-selected": "今日日报尚未发布，本条为 AIHOT 精选池（最近 24 小时）",
+    "aihot-feed": "AI HOT 接口不可用，本条为 AIHOT 精选 RSS（最近 50 条）",
 }
 
 PRIORITY_KEYWORDS: tuple[tuple[str, int], ...] = (
@@ -106,13 +110,14 @@ def _headers() -> dict[str, str]:
 
 
 _AIHOT_PATH_RE = re.compile(r"^/api/v1/[A-Za-z0-9/_.\-]{0,200}$")
+_AIHOT_FEED_PATH = "/feed.xml"
 ALLOWED_AIHOT_HOSTS = ("aihot.news",)
 
 
-def _request_json(path: str, *, params: Optional[dict[str, Any]] = None, timeout_s: int = 30) -> dict[str, Any]:
-    # The target is built from a validated relative path plus a host from a literal
-    # allowlist, so no caller can steer the request to another origin.
-    if not _AIHOT_PATH_RE.match(path or ""):
+def _aihot_url(path: str) -> str:
+    """Build a request target from a validated relative path and a literal allowlist host."""
+
+    if not _AIHOT_PATH_RE.match(path or "") and path != _AIHOT_FEED_PATH:
         raise RuntimeError(f"Refusing to request unexpected AI HOT path: {path!r}")
 
     url = f"https://{ALLOWED_AIHOT_HOSTS[0]}{path}"
@@ -120,7 +125,20 @@ def _request_json(path: str, *, params: Optional[dict[str, Any]] = None, timeout
     if parts.scheme != "https" or (parts.hostname or "").lower() not in ALLOWED_AIHOT_HOSTS:
         raise RuntimeError(f"Refusing to request unexpected AI HOT url: {url}")
     assert_public_http_url(url)
+    return url
 
+
+def _request_text(path: str, *, timeout_s: int = 30) -> str:
+    url = _aihot_url(path)
+    # Redirects stay off: following one would leave the allowed host.
+    r = requests.get(url, headers=_headers(), timeout=timeout_s, allow_redirects=False)
+    if not 200 <= r.status_code < 300:
+        raise RuntimeError(f"AI HOT {path} failed: HTTP {r.status_code}")
+    return r.text
+
+
+def _request_json(path: str, *, params: Optional[dict[str, Any]] = None, timeout_s: int = 30) -> dict[str, Any]:
+    url = _aihot_url(path)
     # Redirects stay off: following one would leave the allowed host.
     r = requests.get(url, params=params, headers=_headers(), timeout=timeout_s, allow_redirects=False)
     if not 200 <= r.status_code < 300:
@@ -517,6 +535,61 @@ def _try_daily(
         return None
 
 
+def _fetch_aihot_feed(limit: int) -> list[DigestItem]:
+    """AI HOT's own RSS feed: Chinese titles and summaries, so no translation is needed."""
+
+    feed = feedparser.parse(_request_text(_AIHOT_FEED_PATH).encode("utf-8"))
+    items: list[DigestItem] = []
+    for entry in getattr(feed, "entries", []) or []:
+        title = _shorten(str(getattr(entry, "title", "") or "").strip(), 200)
+        link = str(getattr(entry, "link", "") or "").strip()
+        if not title or not link:
+            continue
+        author = str(getattr(entry, "author", "") or "")
+        # e.g. "noreply@aihot.news (X：小米 MiMo (@XiaomiMiMo))" — the source name is
+        # the whole parenthetical, which may itself contain parentheses.
+        match = re.search(r"\((.+)\)", author)
+        items.append(
+            DigestItem(
+                title=title,
+                summary=_aihot_feed_summary(str(getattr(entry, "description", "") or "")),
+                url=link,
+                source_name=(match.group(1).strip() if match else "") or "AIHOT 精选",
+                permalink=link,
+                section_label="AIHOT 精选",
+                published_at=_parse_struct_time(getattr(entry, "published_parsed", None)),
+                curated=True,
+            )
+        )
+    return _rank_selected_pool(items, limit)
+
+
+def _aihot_feed_summary(description: str) -> str:
+    """Each feed summary ends with a "阅读原文" link and a "via AIHOT" credit."""
+
+    text = _strip_tags(description)
+    for marker in ("🔗", "via AIHOT"):
+        cut = text.find(marker)
+        if cut != -1:
+            return text[:cut].strip()
+    return text
+
+
+def _strip_tags(value: str) -> str:
+    text = html.unescape(value or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_struct_time(st: Any) -> Optional[datetime]:
+    if not st:
+        return None
+    try:
+        return datetime.fromtimestamp(calendar.timegm(st), tz=timezone.utc)
+    except Exception:
+        return None
+
+
 def fetch_aihot_digest(*, date_str: Optional[str] = None, limit: int = 10) -> tuple[dict[str, Any], list[DigestItem]]:
     """Fetch the digest, degrading to Chinese sources before giving up.
 
@@ -547,6 +620,18 @@ def fetch_aihot_digest(*, date_str: Optional[str] = None, limit: int = 10) -> tu
                 reasons.append("AI HOT selected pool has no usable items")
         except Exception as exc:
             reasons.append(f"AI HOT selected pool failed: {exc}")
+
+    if result is None:
+        # AI HOT's own RSS feed is Chinese and needs no translation, so it beats
+        # the English third-party feeds even when the API itself is unusable.
+        try:
+            items = _fetch_aihot_feed(limit)
+            if items:
+                result = ({"date": requested_date, "source": "aihot-feed"}, items)
+            else:
+                reasons.append("AI HOT feed has no usable items")
+        except Exception as exc:
+            reasons.append(f"AI HOT feed failed: {exc}")
 
     if result is None:
         raise RuntimeError("AI HOT unavailable: " + "; ".join(reasons))

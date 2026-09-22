@@ -1,17 +1,21 @@
 const AIHOT_BASE_URL = "https://aihot.news";
+const AIHOT_SELECTED_FEED_URL = "https://aihot.news/feed.xml";
+const BAIDU_TRANSLATE_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate";
 const DEFAULT_LIMIT = 10;
 const FALLBACK_WINDOW_HOURS = 24;
 const SECTION_QUOTA = 2;
 const SELECTED_POOL_LIMIT = 100;
 const SELECTED_SOURCE_CAP = 3;
 const AIHOT_TIMEOUT_MS = 20000;
+const WEBHOOK_ATTEMPTS = 3;
 
 // Shown in the card footer when the curated daily report was not available, so a
 // degraded digest is never mistaken for the normal one.
 const SOURCE_NOTES = {
   "aihot-daily": "",
   "aihot-selected": "今日日报尚未发布，本条为 AIHOT 精选池（最近 24 小时）",
-  "rss-fallback": "AIHOT 接口暂不可用，本条来自备用 RSS 源"
+  "aihot-feed": "AI HOT 接口不可用，本条为 AIHOT 精选 RSS（最近 50 条）",
+  "rss-fallback": "AI HOT 暂时不可用，本条来自备用 RSS 源"
 };
 
 const FALLBACK_FEEDS = [
@@ -158,11 +162,36 @@ async function runDigest(env, meta = {}, options = {}) {
   const dryRun = Boolean(options.dryRun);
   const limit = clampInt(env.DIGEST_LIMIT, 1, 10, DEFAULT_LIMIT);
   const { date, items, source, fallbackReason } = await fetchDigestWithFallback(env, limit);
+  const title = `智能前沿日报（${date || todayInBeijing()}）`;
+
+  // Every source failed. Say so rather than going silent, so a missing digest is
+  // never mistaken for "there was no news today".
   if (!items.length) {
-    throw new Error("No digest items found");
+    const notice = "所有数据源都不可用，今天没能生成日报。";
+    console.error(`digest unavailable: ${fallbackReason}`);
+    const feishuPayload = env.FEISHU_WEBHOOK_URL ? buildFeishuNoticePayload(title, notice) : null;
+    const weixinPayloads = env.WEIXIN_WEBHOOK ? [{ msgtype: "text", text: { content: `${title}\n${notice}` } }] : null;
+
+    if (dryRun) {
+      if (feishuPayload) await signFeishu(env, feishuPayload);
+      return {
+        ok: false,
+        dryRun: true,
+        reason: "no items",
+        source,
+        fallbackReason,
+        title,
+        count: 0,
+        feishu: feishuPayload ? { skipped: false, dryRun: true, payload: feishuPayload } : { skipped: true },
+        weixin: weixinPayloads ? { skipped: false, dryRun: true, payloads: weixinPayloads } : { skipped: true }
+      };
+    }
+
+    const feishu = feishuPayload ? await sendFeishu(env, feishuPayload) : { skipped: true };
+    const weixin = weixinPayloads ? await sendWeixin(env, weixinPayloads) : { skipped: true };
+    return { ok: false, reason: "no items", source, fallbackReason, title, count: 0, feishu, weixin };
   }
 
-  const title = `智能前沿日报（${date || todayInBeijing()}）`;
   const note = SOURCE_NOTES[source] || "";
 
   const feishuPayload = env.FEISHU_WEBHOOK_URL ? buildFeishuPayload(title, items, note) : null;
@@ -220,6 +249,11 @@ async function fetchDigestWithFallback(env, limit) {
   const pool = await tryFetchSelectedPool(env, limit, reasons);
   if (pool) return { ...pool, fallbackReason: reasons.join("; ") };
 
+  // AI HOT's own RSS feed is Chinese and needs no translation, so it beats the
+  // English third-party feeds even when the API itself is unusable.
+  const feed = await tryFetchAihotFeed(env, limit, reasons);
+  if (feed) return { ...feed, fallbackReason: reasons.join("; ") };
+
   const items = await fetchFallbackDigest(env, limit);
   return {
     date: requestedDate,
@@ -265,6 +299,58 @@ async function tryFetchSelectedPool(env, limit, reasons) {
     reasons.push(`AI HOT selected pool failed: ${errorMessage(error)}`);
     return null;
   }
+}
+
+// AI HOT's own RSS feed: Chinese titles and summaries, so it needs no translation.
+async function tryFetchAihotFeed(env, limit, reasons) {
+  try {
+    const response = await fetchWithTimeout(AIHOT_SELECTED_FEED_URL, {
+      headers: {
+        "accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        "user-agent": env.AIHOT_USER_AGENT || "ai-feishu-digest-worker/0.1"
+      }
+    }, AIHOT_TIMEOUT_MS);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const xml = await response.text();
+    const candidates = parseFeedXml(xml, "AIHOT 精选")
+      .map((item) => ({
+        ...item,
+        summary: aihotFeedSummary(item.summary),
+        sourceName: aihotFeedSource(item.author) || "AIHOT 精选",
+        category: "",
+        sectionLabel: "AIHOT 精选",
+        curated: true
+      }))
+      .filter((item) => item.title && item.url);
+
+    const items = rankSelectedPool(candidates, limit);
+    if (!items.length) {
+      reasons.push("AI HOT feed has no usable items");
+      return null;
+    }
+    return { date: todayInBeijing(), items, source: "aihot-feed" };
+  } catch (error) {
+    reasons.push(`AI HOT feed failed: ${errorMessage(error)}`);
+    return null;
+  }
+}
+
+// Each feed summary ends with a "阅读原文" link and a "via AIHOT" credit.
+function aihotFeedSummary(description) {
+  const text = clean(description);
+  for (const marker of ["🔗", "via AIHOT"]) {
+    const cut = text.indexOf(marker);
+    if (cut !== -1) return clean(text.slice(0, cut));
+  }
+  return text;
+}
+
+// <author>noreply@aihot.news (X：小米 MiMo (@XiaomiMiMo))</author>
+function aihotFeedSource(author) {
+  // The source name is the whole parenthetical, which may itself contain parentheses.
+  const match = String(author || "").match(/\((.+)\)/);
+  return match ? clean(match[1]) : "";
 }
 
 async function fetchDailyReport(env, date) {
@@ -506,6 +592,7 @@ function parseFeedXml(xml, sourceName) {
       summary,
       url,
       sourceName,
+      author: xmlText(block, "author"),
       category: "rss",
       sectionLabel: "备用来源",
       score: null,
@@ -562,14 +649,17 @@ function fallbackScore(item) {
 async function translateFallbackItems(env, items) {
   const appid = clean(env.BAIDU_FANYI_APPID || env.BAIDU_TRANSLATE_APPID || env.BAIDU_APPID);
   const key = clean(env.BAIDU_FANYI_KEY || env.BAIDU_TRANSLATE_KEY || env.BAIDU_APIKEY || env.BAIDU_API_KEY || env.BAIDU_KEY);
-  if (!appid || !key || !items.length) return items;
+  if (!appid || !key || !items.length) {
+    console.log("baidu translate skipped: credentials missing");
+    return items;
+  }
 
   const titleLines = items.map((item) => item.title);
   const summaryLines = items.map((item) => shorten(oneSentence(item.summary), 160));
-  const [titlesZh, summariesZh] = await Promise.all([
-    baiduTranslateLines(titleLines, appid, key),
-    baiduTranslateLines(summaryLines, appid, key)
-  ]);
+  // The free Baidu tier allows roughly one request per second, so the two
+  // batches go out one after the other rather than in parallel.
+  const titlesZh = await baiduTranslateLines(titleLines, appid, key);
+  const summariesZh = await baiduTranslateLines(summaryLines, appid, key);
 
   return items.map((item, index) => ({
     ...item,
@@ -578,11 +668,18 @@ async function translateFallbackItems(env, items) {
   }));
 }
 
+// Baidu answers with one result per non-empty line, so blank lines are left out
+// of the request and answers are mapped back by index. A partial answer is used
+// as-is instead of throwing away the whole batch.
 async function baiduTranslateLines(lines, appid, key) {
-  const safeLines = lines.map((line) => clean(line).replace(/\n/g, " "));
-  if (!safeLines.some(Boolean)) return lines;
+  const targets = [];
+  lines.forEach((line, index) => {
+    const text = clean(line).replace(/\n/g, " ");
+    if (text) targets.push({ index, text });
+  });
+  if (!targets.length) return lines;
 
-  const q = safeLines.join("\n");
+  const q = targets.map((target) => target.text).join("\n");
   const salt = `${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`;
   const sign = md5(`${appid}${q}${salt}${key}`);
   const body = new URLSearchParams({
@@ -594,20 +691,29 @@ async function baiduTranslateLines(lines, appid, key) {
     sign
   });
 
-  const response = await fetchWithTimeout("https://fanyi-api.baidu.com/api/trans/vip/translate", {
+  const response = await fetchWithTimeout(BAIDU_TRANSLATE_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body
   }, 20000);
-  if (!response.ok) return lines;
+  if (!response.ok) {
+    console.error(`baidu translate HTTP ${response.status}`);
+    return lines;
+  }
 
   const payload = await response.json().catch(() => null);
-  if (!payload || payload.error_code || !Array.isArray(payload.trans_result)) return lines;
+  if (!payload || payload.error_code || !Array.isArray(payload.trans_result)) {
+    console.error(`baidu translate rejected: ${JSON.stringify(payload || {}).slice(0, 300)}`);
+    return lines;
+  }
 
-  const translated = payload.trans_result
-    .map((item) => clean(item && item.dst))
-    .filter((line) => line);
-  return translated.length === lines.length ? translated : lines;
+  const out = [...lines];
+  payload.trans_result.forEach((entry, position) => {
+    const target = targets[position];
+    const translated = target ? clean(entry && entry.dst) : "";
+    if (target && translated) out[target.index] = translated;
+  });
+  return out;
 }
 
 function selectSectionBalanced(sectionBuckets, publicFillers, limit) {
@@ -771,6 +877,22 @@ function buildFeishuPayload(title, items, note) {
   };
 }
 
+function buildFeishuNoticePayload(title, notice) {
+  return {
+    msg_type: "interactive",
+    card: {
+      config: { wide_screen_mode: true },
+      header: {
+        template: "orange",
+        title: { tag: "plain_text", content: title }
+      },
+      elements: [
+        { tag: "div", text: { tag: "lark_md", content: escapeLark(notice) } }
+      ]
+    }
+  };
+}
+
 async function sendFeishu(env, payload) {
   await signFeishu(env, payload);
   return postJson(env.FEISHU_WEBHOOK_URL, payload, "feishu");
@@ -848,6 +970,20 @@ async function sendWeixin(env, payloads) {
 
 async function postJson(url, payload, kind) {
   assertPublicHttpUrl(url);
+  let lastError;
+  for (let attempt = 1; attempt <= WEBHOOK_ATTEMPTS; attempt += 1) {
+    try {
+      return await postJsonOnce(url, payload, kind);
+    } catch (error) {
+      lastError = error;
+      console.error(`${kind} webhook attempt ${attempt}/${WEBHOOK_ATTEMPTS} failed: ${errorMessage(error)}`);
+      if (attempt < WEBHOOK_ATTEMPTS) await sleep(500 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+async function postJsonOnce(url, payload, kind) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -862,6 +998,10 @@ async function postJson(url, payload, kind) {
     throw new Error(`${kind} webhook error: ${JSON.stringify(data)}`);
   }
   return { ok: true };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function itemMeta(item) {

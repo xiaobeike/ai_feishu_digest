@@ -65,6 +65,29 @@ check("late daily: reason recorded", "404" in late_meta["fallbackReason"], late_
 late_markdown = aihot.render_aihot_markdown(date_str=beijing_tomorrow(), limit=10)
 check("late daily: markdown carries the note", aihot.SOURCE_NOTES["aihot-selected"] in late_markdown)
 
+# 3. The API is down but the site is up: AI HOT's own Chinese RSS feed is used, so
+#    the digest stays Chinese without depending on any translation service.
+_real_request_json = aihot._request_json
+
+
+def _api_down(path, **kwargs):
+    if path.startswith("/api/v1/"):
+        raise RuntimeError("simulated API outage")
+    return _real_request_json(path, **kwargs)
+
+
+aihot._request_json = _api_down
+try:
+    feed_meta, feed_items = aihot.fetch_aihot_digest(limit=10)
+finally:
+    aihot._request_json = _real_request_json
+
+check("aihot feed: uses the Chinese feed", feed_meta["source"] == "aihot-feed", f"source={feed_meta['source']}")
+check("aihot feed: titles are Chinese", all(has_cjk(item.title) for item in feed_items))
+check("aihot feed: summaries are Chinese", all(has_cjk(item.summary) for item in feed_items if item.summary))
+check("aihot feed: summaries drop the feed trailer", all("阅读原文" not in item.summary for item in feed_items))
+check("aihot feed: source names are kept", all(item.source_name for item in feed_items))
+
 # 3. Outbound requests refuse private and non-HTTP targets.
 for url, label in (
     ("http://127.0.0.1:9/hook", "loopback"),

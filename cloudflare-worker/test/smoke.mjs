@@ -112,6 +112,115 @@ const baseEnv = {
   check("weixin: note on last article", articles[articles.length - 1].description.includes("精选池"));
 }
 
+// 6. The API is down but the site is up: AI HOT's own Chinese RSS feed is used,
+//    so the digest stays Chinese without needing any translation service.
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("aihot.news/api/")) return Promise.resolve(new Response("api down", { status: 503 }));
+    return realFetch(input, init);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, DIGEST_DATE: beijingDate() });
+    check("aihot feed: uses the Chinese feed", body.source === "aihot-feed", `source=${body.source}`);
+    check("aihot feed: titles are Chinese", body.itemTitles.every(hasCjk));
+    check("aihot feed: card notes the fallback", cardLines(body.feishu.payload).some((line) => line.includes("精选 RSS")));
+    check("aihot feed: summaries have no feed trailer", cardLines(body.feishu.payload).every((line) => !line.includes("阅读原文")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 7. Every source is down: a notice is sent instead of going silent.
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("aihot.news")) return Promise.resolve(new Response("down", { status: 503 }));
+    if (url.includes("feed") || url.includes("rss") || url.includes("arxiv") || url.includes("blog")) {
+      return Promise.resolve(new Response("down", { status: 503 }));
+    }
+    return realFetch(input, init);
+  };
+  try {
+    const { status, body } = await run({ ...baseEnv, DIGEST_DATE: beijingDate() });
+    check("all down: reports failure", status === 200 && body.ok === false, `ok=${body.ok} reason=${body.reason}`);
+    check("all down: count is zero", body.count === 0, `count=${body.count}`);
+    check("all down: notice payload built", Boolean(body.feishu.payload), JSON.stringify(body.feishu).slice(0, 80));
+    check(
+      "all down: notice explains itself",
+      cardLines(body.feishu.payload).some((line) => line.includes("没能生成日报"))
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 8. The English RSS fallback must reach Baidu and come back translated. This is
+//    the path that silently stayed English on 2026-09-22.
+{
+  const realFetch = globalThis.fetch;
+  const baiduRequests = [];
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("aihot.news")) return new Response("down", { status: 503 });
+    if (url.includes("fanyi-api.baidu.com")) {
+      const q = new URLSearchParams(String(init?.body || "")).get("q") || "";
+      baiduRequests.push(q);
+      // Answer one entry per line, like Baidu does.
+      const trans_result = q.split("\n").map((src) => ({ src, dst: `中文译文${src.length}` }));
+      return new Response(JSON.stringify({ from: "en", to: "zh", trans_result }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    return realFetch(input, init);
+  };
+  try {
+    const { body } = await run({
+      ...baseEnv,
+      DIGEST_DATE: beijingDate(),
+      BAIDU_FANYI_APPID: "test-appid",
+      BAIDU_APIKEY: "test-key"
+    });
+    check("baidu: two batched requests", baiduRequests.length === 2, `requests=${baiduRequests.length}`);
+    check("baidu: no blank lines sent", baiduRequests.every((q) => !q.includes("\n\n")));
+    check("baidu: titles were translated", body.itemTitles.every((title) => title.startsWith("中文译文")), body.itemTitles[0]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 9. A flaky webhook is retried rather than losing the digest.
+{
+  const realFetch = globalThis.fetch;
+  let webhookCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("open.feishu.cn")) {
+      webhookCalls += 1;
+      if (webhookCalls < 3) return new Response("boom", { status: 500 });
+      return new Response(JSON.stringify({ code: 0 }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("qyapi.weixin.qq.com")) {
+      throw new Error("this test must not reach the WeCom webhook");
+    }
+    return realFetch(input, init);
+  };
+  try {
+    // WEIXIN_WEBHOOK is cleared so the only webhook in play is the stubbed Feishu one.
+    const { body } = await run(
+      { ...baseEnv, WEIXIN_WEBHOOK: "", DIGEST_DATE: beijingDate() },
+      "?dry=0"
+    );
+    check("retry: webhook attempted three times", webhookCalls === 3, `calls=${webhookCalls}`);
+    check("retry: digest delivered on the third try", body.feishu && body.feishu.ok === true, JSON.stringify(body).slice(0, 200));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 const failed = results.filter((result) => !result.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length) {

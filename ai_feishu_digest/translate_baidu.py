@@ -45,8 +45,15 @@ def translate_lines_zh(lines: List[str], *, timeout_s: int = 20) -> List[str]:
     if not appid or not key:
         return lines
 
-    safe_lines = [(s or "").replace("\n", " ").strip() for s in lines]
-    q = "\n".join(safe_lines)
+    # Baidu answers with one result per non-empty line, so blank lines are left out
+    # of the request and answers are mapped back by index. A partial answer is used
+    # as-is instead of throwing away the whole batch.
+    targets = [(index, (line or "").replace("\n", " ").strip()) for index, line in enumerate(lines)]
+    targets = [(index, text) for index, text in targets if text]
+    if not targets:
+        return lines
+
+    q = "\n".join(text for _, text in targets)
 
     salt = f"{int(time.time())}{secrets.randbelow(9000) + 1000}"
     sign = _sign(appid, q, salt, key)
@@ -79,13 +86,14 @@ def translate_lines_zh(lines: List[str], *, timeout_s: int = 20) -> List[str]:
 
     trans = payload.get("trans_result")
     if not isinstance(trans, list):
+        sys.stderr.write("Baidu translate returned no trans_result\n")
         return lines
 
-    out: List[str] = []
-    for obj in trans:
-        if isinstance(obj, dict) and isinstance(obj.get("dst"), str):
-            out.append(obj["dst"].strip())
-
-    if len(out) != len(lines):
-        return lines
+    out = list(lines)
+    for position, obj in enumerate(trans):
+        if position >= len(targets):
+            break
+        dst = obj.get("dst") if isinstance(obj, dict) else None
+        if isinstance(dst, str) and dst.strip():
+            out[targets[position][0]] = dst.strip()
     return out
