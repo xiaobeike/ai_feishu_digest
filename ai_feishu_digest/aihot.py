@@ -29,7 +29,7 @@ SELECTED_SOURCE_CAP = 3
 # degraded digest is never mistaken for the normal one.
 SOURCE_NOTES = {
     "aihot-daily": "",
-    "aihot-selected": "今日日报尚未发布，本条为 AIHOT 精选池（最近 24 小时）",
+    "aihot-selected": "今日日报尚未发布，本条为 AIHOT 最近 24 小时内容",
     "aihot-feed": "AI HOT 接口不可用，本条为 AIHOT 精选 RSS（最近 50 条）",
 }
 
@@ -469,6 +469,34 @@ def _rank_selected_pool(items: list[DigestItem], limit: int) -> list[DigestItem]
     return chosen
 
 
+def _top_up_from_pool(chosen: list[DigestItem], pool: list[DigestItem], limit: int) -> list[DigestItem]:
+    """Append pool items that are not already covered, preferring a spread of sources."""
+
+    out = list(chosen)
+    counts: dict[str, int] = {}
+    for it in out:
+        counts[it.source_name] = counts.get(it.source_name, 0) + 1
+
+    ranked = sorted(pool, key=_public_sort_key, reverse=True)
+
+    def add(it: DigestItem, apply_cap: bool) -> None:
+        if len(out) >= limit:
+            return
+        if any(_looks_like_same_story(it, old) for old in out):
+            return
+        count = counts.get(it.source_name, 0)
+        if apply_cap and count >= SELECTED_SOURCE_CAP:
+            return
+        counts[it.source_name] = count + 1
+        out.append(it)
+
+    for it in ranked:
+        add(it, True)
+    for it in ranked:
+        add(it, False)
+    return out
+
+
 def _fetch_report(date_str: Optional[str]) -> dict[str, Any]:
     path = f"/api/v1/dailies/{date_str}" if date_str else "/api/v1/dailies/latest"
     payload = _request_json(path)
@@ -613,7 +641,14 @@ def fetch_aihot_digest(*, date_str: Optional[str] = None, limit: int = 10) -> tu
 
     if result is None:
         try:
-            items = _rank_selected_pool(_fetch_pool("selected"), limit)
+            selected = _rank_selected_pool(_fetch_pool("selected"), limit)
+            # The curated pool is often thin, so it is topped up from the wider pool
+            # instead of sending a three-item digest.
+            items = (
+                _top_up_from_pool(selected, _fetch_pool("all"), limit)
+                if 0 < len(selected) < limit
+                else selected
+            )
             if items:
                 result = ({"date": requested_date, "source": "aihot-selected"}, items)
             else:

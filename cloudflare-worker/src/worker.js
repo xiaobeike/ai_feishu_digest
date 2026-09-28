@@ -13,7 +13,7 @@ const WEBHOOK_ATTEMPTS = 3;
 // degraded digest is never mistaken for the normal one.
 const SOURCE_NOTES = {
   "aihot-daily": "",
-  "aihot-selected": "今日日报尚未发布，本条为 AIHOT 精选池（最近 24 小时）",
+  "aihot-selected": "今日日报尚未发布，本条为 AIHOT 最近 24 小时内容",
   "aihot-feed": "AI HOT 接口不可用，本条为 AIHOT 精选 RSS（最近 50 条）",
   "rss-fallback": "AI HOT 暂时不可用，本条来自备用 RSS 源"
 };
@@ -267,7 +267,17 @@ async function tryFetchDaily(env, date, limit, reasons) {
   const label = date || "latest";
   try {
     const report = await fetchDailyReport(env, date);
-    const items = selectSectionBalanced(sectionBuckets(report), [], limit);
+    const buckets = sectionBuckets(report);
+    let items = selectSectionBalanced(buckets, [], limit);
+    if (items.length && items.length < limit) {
+      // A thin report is topped up from the wider pool rather than sending the
+      // user two items on a slow news day.
+      try {
+        items = selectSectionBalanced(buckets, await fetchPool(env, "all"), limit);
+      } catch (error) {
+        reasons.push(`AI HOT pool fill failed: ${errorMessage(error)}`);
+      }
+    }
     if (!items.length) {
       reasons.push(`AI HOT daily ${label} has no usable items`);
       return null;
@@ -279,17 +289,25 @@ async function tryFetchDaily(env, date, limit, reasons) {
   }
 }
 
+async function fetchPool(env, mode) {
+  const payload = await requestAihot(env, "/api/v1/items", {
+    mode,
+    window: "24h",
+    limit: String(SELECTED_POOL_LIMIT)
+  });
+  return (payload.items || [])
+    .map(selectedPoolItem)
+    .filter((item) => item.title && item.url);
+}
+
 async function tryFetchSelectedPool(env, limit, reasons) {
   try {
-    const payload = await requestAihot(env, "/api/v1/items", {
-      mode: "selected",
-      window: "24h",
-      limit: String(SELECTED_POOL_LIMIT)
-    });
-    const candidates = (payload.items || [])
-      .map(selectedPoolItem)
-      .filter((item) => item.title && item.url);
-    const items = rankSelectedPool(candidates, limit);
+    const selected = rankSelectedPool(await fetchPool(env, "selected"), limit);
+    // The curated pool is often thin (three items on 2026-09-28), so it is topped
+    // up from the wider pool instead of sending a three-item digest.
+    const items = selected.length && selected.length < limit
+      ? topUpFromPool(selected, await fetchPool(env, "all"), limit)
+      : selected;
     if (!items.length) {
       reasons.push("AI HOT selected pool has no usable items");
       return null;
@@ -299,6 +317,28 @@ async function tryFetchSelectedPool(env, limit, reasons) {
     reasons.push(`AI HOT selected pool failed: ${errorMessage(error)}`);
     return null;
   }
+}
+
+// Appends pool items that are not already covered, preferring a spread of sources
+// and falling back to an uncapped pass when the cap cannot fill the digest.
+function topUpFromPool(chosen, pool, limit) {
+  const out = [...chosen];
+  const counts = new Map();
+  for (const item of out) counts.set(item.sourceName, (counts.get(item.sourceName) || 0) + 1);
+
+  const ranked = [...pool].sort((a, b) => comparePublic(b, a));
+  const add = (item, applyCap) => {
+    if (out.length >= limit) return;
+    if (out.some((old) => looksLikeSameStory(item, old))) return;
+    const count = counts.get(item.sourceName) || 0;
+    if (applyCap && count >= SELECTED_SOURCE_CAP) return;
+    counts.set(item.sourceName, count + 1);
+    out.push(item);
+  };
+
+  for (const item of ranked) add(item, true);
+  for (const item of ranked) add(item, false);
+  return out;
 }
 
 // AI HOT's own RSS feed: Chinese titles and summaries, so it needs no translation.

@@ -35,6 +35,14 @@ async function run(env, query = "?dry=1") {
 }
 
 const hasCjk = (value) => /[\u4e00-\u9fff]/.test(String(value || ""));
+
+// fetch() is called with strings, URL objects and Requests; URL has .href, not .url.
+function requestUrl(input) {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return (input && input.url) || String(input);
+}
+
 const cardLines = (payload) =>
   payload.card.elements.filter((element) => element.tag === "div").map((element) => element.text.content);
 
@@ -53,7 +61,7 @@ const baseEnv = {
   check("daily: uses the curated report", body.source === "aihot-daily", `source=${body.source}`);
   check("daily: 10 items", body.count === 10, `count=${body.count}`);
   check("daily: titles are Chinese", body.itemTitles.every(hasCjk));
-  check("daily: no fallback note in card", !cardLines(body.feishu.payload).some((line) => line.includes("精选池")));
+  check("daily: no fallback note in card", !cardLines(body.feishu.payload).some((line) => line.includes("尚未发布")));
   check("daily: one button per item", body.feishu.payload.card.elements.filter((e) => e.tag === "action").length === body.count);
   check("daily: card is signed", typeof body.feishu.payload.sign === "string" && body.feishu.payload.sign.length > 0);
 }
@@ -66,7 +74,7 @@ const baseEnv = {
   check("late daily: HTTP 200", status === 200, `status=${status}`);
   check("late daily: stays on AI HOT", body.source !== "rss-fallback", `source=${body.source}`);
   check("late daily: titles are Chinese", body.itemTitles.every(hasCjk));
-  check("late daily: card notes the degraded source", cardLines(body.feishu.payload).some((line) => line.includes("精选池")));
+  check("late daily: card notes the degraded source", cardLines(body.feishu.payload).some((line) => line.includes("尚未发布")));
   check("late daily: reason recorded", body.fallbackReason.includes("404"), body.fallbackReason);
 }
 
@@ -74,7 +82,7 @@ const baseEnv = {
 {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (input, init) => {
-    const url = typeof input === "string" ? input : input.url;
+    const url = requestUrl(input);
     if (url.includes("aihot.news")) return Promise.resolve(new Response("upstream down", { status: 503 }));
     return realFetch(input, init);
   };
@@ -109,7 +117,7 @@ const baseEnv = {
   const payloads = body.weixin.payloads || [];
   const articles = payloads.flatMap((payload) => payload.news.articles);
   check("weixin: 10 articles in 2 chunks", articles.length === 10 && payloads.length === 2, `${articles.length}/${payloads.length}`);
-  check("weixin: note on last article", articles[articles.length - 1].description.includes("精选池"));
+  check("weixin: note on last article", articles[articles.length - 1].description.includes("尚未发布"));
 }
 
 // 6. The API is down but the site is up: AI HOT's own Chinese RSS feed is used,
@@ -117,7 +125,7 @@ const baseEnv = {
 {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (input, init) => {
-    const url = typeof input === "string" ? input : input.url;
+    const url = requestUrl(input);
     if (url.includes("aihot.news/api/")) return Promise.resolve(new Response("api down", { status: 503 }));
     return realFetch(input, init);
   };
@@ -136,7 +144,7 @@ const baseEnv = {
 {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (input, init) => {
-    const url = typeof input === "string" ? input : input.url;
+    const url = requestUrl(input);
     if (url.includes("aihot.news")) return Promise.resolve(new Response("down", { status: 503 }));
     if (url.includes("feed") || url.includes("rss") || url.includes("arxiv") || url.includes("blog")) {
       return Promise.resolve(new Response("down", { status: 503 }));
@@ -163,7 +171,7 @@ const baseEnv = {
   const realFetch = globalThis.fetch;
   const baiduRequests = [];
   globalThis.fetch = async (input, init) => {
-    const url = typeof input === "string" ? input : input.url;
+    const url = requestUrl(input);
     if (url.includes("aihot.news")) return new Response("down", { status: 503 });
     if (url.includes("fanyi-api.baidu.com")) {
       const q = new URLSearchParams(String(init?.body || "")).get("q") || "";
@@ -197,7 +205,7 @@ const baseEnv = {
   const realFetch = globalThis.fetch;
   let webhookCalls = 0;
   globalThis.fetch = async (input, init) => {
-    const url = typeof input === "string" ? input : input.url;
+    const url = requestUrl(input);
     if (url.includes("open.feishu.cn")) {
       webhookCalls += 1;
       if (webhookCalls < 3) return new Response("boom", { status: 500 });
@@ -216,6 +224,48 @@ const baseEnv = {
     );
     check("retry: webhook attempted three times", webhookCalls === 3, `calls=${webhookCalls}`);
     check("retry: digest delivered on the third try", body.feishu && body.feishu.ok === true, JSON.stringify(body).slice(0, 200));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 10. A thin daily report must be topped up from the pool. On 2026-09-28 the
+//     report held a single section with two items and the digest sent just those
+//     two; the pool fill had been dropped during the v1 migration.
+{
+  const realFetch = globalThis.fetch;
+  const dailyItem = (n) => ({
+    title: `薄日报条目 ${n}`,
+    summary: `摘要 ${n}`,
+    source: { name: "测试源" },
+    links: { aihot: `https://aihot.news/items/thin-${n}`, original: `https://example.com/thin-${n}` }
+  });
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("/api/v1/dailies/")) {
+      const report = {
+        date: beijingDate(),
+        generatedAt: new Date().toISOString(),
+        windowStart: new Date(Date.now() - 86400000).toISOString(),
+        windowEnd: new Date().toISOString(),
+        links: { aihot: "https://aihot.news/daily/thin" },
+        lead: null,
+        sections: [{ label: "行业动态", items: [dailyItem(1), dailyItem(2)] }],
+        flashes: []
+      };
+      return new Response(JSON.stringify({ schemaVersion: 1, report }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    return realFetch(input, init);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, DIGEST_DATE: beijingDate() });
+    check("thin daily: filled up to the limit", body.count === 10, `count=${body.count}`);
+    check("thin daily: still the curated report", body.source === "aihot-daily", `source=${body.source}`);
+    check("thin daily: the report's own items come first", body.itemTitles[0] === "薄日报条目 1", body.itemTitles[0]);
+    check("thin daily: no fallback note", !cardLines(body.feishu.payload).some((line) => line.includes("尚未发布")));
   } finally {
     globalThis.fetch = realFetch;
   }
