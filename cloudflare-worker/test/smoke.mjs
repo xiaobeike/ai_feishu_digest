@@ -271,6 +271,279 @@ const baseEnv = {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 竞品流水线（/run?job=competitor）——全部 dry 或桩定 webhook，绝不碰真实群。
+// ---------------------------------------------------------------------------
+
+function memoryKV() {
+  const store = new Map();
+  return {
+    store,
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    async put(key, value) {
+      store.set(key, String(value));
+    }
+  };
+}
+
+function rssChannel(items) {
+  return `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>stub</title>${items.join("")}</channel></rss>`;
+}
+
+function rssItem({ title, media, url, snippet = "", ageHours = 2 }) {
+  return `<item><title>${title}</title><link>${url}</link>`
+    + `<guid isPermaLink="false">${url}</guid>`
+    + `<pubDate>${new Date(Date.now() - ageHours * 3600000).toUTCString()}</pubDate>`
+    + `<description>&lt;p&gt;${snippet}&lt;/p&gt;</description>`
+    + `<source url="https://media.example.com/">${media}</source></item>`;
+}
+
+// 极简 LLM 桩：标题含公司名则 keep 并回摘要，否则判不相关；行业模式全收。
+function llmStubResponse(input, init) {
+  const body = JSON.parse(String(init?.body || "{}"));
+  const user = body.messages ? body.messages[body.messages.length - 1].content : "";
+  const results = [];
+  const names = ["钧控", "灵手", "大医匠", "暖小贝", "力驰", "具身风暴", "德壹", "Aescape", "AiTreat", "Capsix Robotics", "Phybot", "Massage Robotics"];
+  const industryMode = user.includes("AI 按摩/理疗机器人行业");
+  const re = /"i":(\d+),"title":"((?:[^"\\]|\\.)*)"/g;
+  let match;
+  while ((match = re.exec(user))) {
+    const i = Number(match[1]);
+    const title = match[2].replace(/\\"/g, '"');
+    const company = names.find((name) => title.includes(name));
+    // 模拟真模型的判断：含公司名但讲的是别的事（物流等）判为不相关。
+    const sameNameNoise = /物流/.test(title);
+    if (industryMode || (company && !sameNameNoise)) {
+      results.push({ i, keep: true, company: company || "", summary: `${company || "行业"}新闻摘要${i}` });
+    } else {
+      results.push({ i, keep: false, company: "", summary: "" });
+    }
+  }
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content: JSON.stringify({ results }) } }] }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
+// 搜索桩：按 q 参数里的片段返回条目；未命中返回空 RSS；engine 可以为同一故事
+// 返回不同 URL（模拟 Google/Bing 各自收录）。
+function searchStub({ google = {}, bing = {} } = {}) {
+  return async (input) => {
+    const url = requestUrl(input);
+    if (!url.includes("news.google.com") && !url.includes("bing.com")) {
+      throw new Error(`competitor test got unexpected request: ${url}`);
+    }
+    const isBing = url.includes("bing.com");
+    const handlers = isBing ? bing : google;
+    const q = new URL(url).searchParams.get("q") || "";
+    for (const [fragment, items] of Object.entries(handlers)) {
+      if (q.includes(fragment)) {
+        return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
+      }
+    }
+    return new Response(rssChannel([]), { status: 200, headers: { "content-type": "application/xml" } });
+  };
+}
+
+const deyeeItem = (url) => rssItem({
+  title: "德壹发布新一代理疗机器人",
+  media: "网易新闻",
+  url,
+  snippet: "德壹医疗在深圳发布新一代具身智能理疗机器人。",
+  ageHours: 2
+});
+const lichiNoiseItem = () => rssItem({
+  title: "力驰物流开通东南亚新航线",
+  media: "澎湃新闻",
+  url: "https://example.com/lichi-logistics",
+  snippet: "力驰物流宣布开通东南亚新航线。",
+  ageHours: 3
+});
+
+// 11. 正常路径：公司档命中，LLM 过滤掉同名无关新闻，卡片带出处与摘要。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    if (url.includes("news.google.com")) {
+      const q = new URL(url).searchParams.get("q") || "";
+      const items = [];
+      if (q.includes("德壹")) items.push(deyeeItem("https://example.com/deyee-1"));
+      if (q.includes("力驰")) items.push(lichiNoiseItem());
+      return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
+    }
+    if (url.includes("bing.com")) {
+      const q = new URL(url).searchParams.get("q") || "";
+      // 同一故事、不同 URL：跨引擎去重必须合成一条。
+      const items = q.includes("德壹") ? [deyeeItem("https://example.com/deyee-1-bing")] : [];
+      return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
+    }
+    return realFetch(input, init);
+  };
+  try {
+    const kv = memoryKV();
+    const { status, body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", COMPETITOR_STATE: kv }, "?job=competitor&dry=1");
+    check("competitor: HTTP 200", status === 200, `status=${status}`);
+    check("competitor: job marked", body.job === "competitor", JSON.stringify(body).slice(0, 120));
+    check("competitor: hits companies tier", body.tier === "companies", `tier=${body.tier}`);
+    check("competitor: noise filtered by LLM", body.count === 1, `count=${body.count}`);
+    check("competitor: grouped under 德壹", body.groups[0] && body.groups[0].company === "德壹", JSON.stringify(body.groups));
+    check("competitor: indigo card", body.feishu.payload.card.header.template === "indigo");
+    const lines = cardLines(body.feishu.payload);
+    check("competitor: card carries article link", lines.some((line) => line.includes("](https://example.com/deyee-1)")), JSON.stringify(lines));
+    check("competitor: card carries source media", lines.some((line) => line.includes("网易新闻")));
+    check("competitor: card carries LLM summary", lines.some((line) => line.includes("新闻摘要")));
+    check("competitor: no degrade note", !lines.some((line) => line.includes("LLM 过滤不可用")));
+    check("competitor: payload signed", typeof body.feishu.payload.sign === "string" && body.feishu.payload.sign.length > 0);
+    check("competitor: dry-run leaves KV untouched", kv.store.size === 0, `kv=${kv.store.size}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 12. LLM 挂掉：退回关键词过滤，尾注自报家门，条目不丢。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return new Response("boom", { status: 500 });
+    if (url.includes("news.google.com")) {
+      const q = new URL(url).searchParams.get("q") || "";
+      const items = [];
+      if (q.includes("德壹")) items.push(deyeeItem("https://example.com/deyee-1"));
+      if (q.includes("力驰")) items.push(lichiNoiseItem());
+      return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
+    }
+    return new Response(rssChannel([]), { status: 200, headers: { "content-type": "application/xml" } });
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key" }, "?job=competitor&dry=1");
+    check("llm down: falls back to companies tier", body.tier === "companies", `tier=${body.tier}`);
+    check("llm down: keyword mode keeps both items", body.count === 2, `count=${body.count}`);
+    check("llm down: card notes the fallback", cardLines(body.feishu.payload).some((line) => line.includes("LLM 过滤不可用")));
+    check("llm down: rss summary used as fallback text", cardLines(body.feishu.payload).some((line) => line.includes("德壹医疗在深圳")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 13. 公司档全空：降级到国外竞品档。
+{
+  const realFetch = globalThis.fetch;
+  const aescapeItem = () => rssItem({
+    title: "Aescape expands robotic massage to Massage Envy",
+    media: "TechCrunch",
+    url: "https://example.com/aescape-1",
+    snippet: "Aescape announced a national rollout of its robotic massage tables.",
+    ageHours: 3
+  });
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    return searchStub({ google: { Aescape: [aescapeItem()] } })(input);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key" }, "?job=competitor&dry=1");
+    check("foreign: downgrades to foreign tier", body.tier === "foreign", `tier=${body.tier}`);
+    check("foreign: card notes the downgrade", cardLines(body.feishu.payload).some((line) => line.includes("国外同类竞品")));
+    check("foreign: grouped under Aescape", body.groups[0] && body.groups[0].company === "Aescape", JSON.stringify(body.groups));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 14. 公司档和国外档都空：行业档兜底。
+{
+  const realFetch = globalThis.fetch;
+  const industryItem = () => rssItem({
+    title: "按摩机器人迎来政策利好",
+    media: "36氪",
+    url: "https://example.com/industry-1",
+    snippet: "多地出台政策支持康养机器人产业发展。",
+    ageHours: 5
+  });
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    return searchStub({ google: { 按摩机器人: [industryItem()] } })(input);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key" }, "?job=competitor&dry=1");
+    check("industry: downgrades to industry tier", body.tier === "industry", `tier=${body.tier}`);
+    check("industry: card notes the downgrade", cardLines(body.feishu.payload).some((line) => line.includes("行业报道")));
+    check("industry: grouped under industry", body.groups[0] && body.groups[0].company === "AI 按摩机器人行业", JSON.stringify(body.groups));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 15. 三档全空：灰色「今日无更新」卡片，绝不静默。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = searchStub();
+  try {
+    const { status, body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key" }, "?job=competitor&dry=1");
+    check("all empty: ok with zero items", status === 200 && body.ok === true && body.count === 0, `ok=${body.ok} count=${body.count}`);
+    check("all empty: none tier", body.tier === "none", `tier=${body.tier}`);
+    check("all empty: grey notice card", body.feishu.payload.card.header.template === "grey");
+    check("all empty: notice explains itself", cardLines(body.feishu.payload).some((line) => line.includes("未搜到相关新闻")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 16. 搜索源全挂：橙色告警卡片，ok=false。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = requestUrl(input);
+    if (url.includes("news.google.com") || url.includes("bing.com")) {
+      return new Response("down", { status: 503 });
+    }
+    throw new Error(`competitor test got unexpected request: ${url}`);
+  };
+  try {
+    const { status, body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key" }, "?job=competitor&dry=1");
+    check("engines down: reports failure", status === 200 && body.ok === false, `ok=${body.ok}`);
+    check("engines down: orange notice card", body.feishu.payload.card.header.template === "orange");
+    check("engines down: notice explains itself", cardLines(body.feishu.payload).some((line) => line.includes("搜索源暂时全部不可用")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 17. 真实推送（dry=0，webhook 已桩定）：推送成功后写入 KV，第二天同文不再推。
+{
+  const realFetch = globalThis.fetch;
+  const kv = memoryKV();
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.feishu.cn")) {
+      return new Response(JSON.stringify({ code: 0 }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    if (url.includes("news.google.com") || url.includes("bing.com")) {
+      return searchStub({ google: { 德壹: [deyeeItem("https://example.com/deyee-1")] } })(input);
+    }
+    throw new Error(`competitor test got unexpected request: ${url}`);
+  };
+  try {
+    const { body } = await run(
+      { ...baseEnv, WEIXIN_WEBHOOK: "", ZHIPU_API_KEY: "test-key", COMPETITOR_STATE: kv },
+      "?job=competitor&dry=0"
+    );
+    check("kv: push delivered", body.feishu && body.feishu.ok === true, JSON.stringify(body.feishu).slice(0, 120));
+    check("kv: seen marks written after push", kv.store.size === 1, `kv=${kv.store.size}`);
+    const second = await run({ ...baseEnv, WEIXIN_WEBHOOK: "", ZHIPU_API_KEY: "test-key", COMPETITOR_STATE: kv }, "?job=competitor&dry=1");
+    check("kv: seen item filtered on next run", second.body.tier === "none" && second.body.count === 0, `tier=${second.body.tier} count=${second.body.count}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 const failed = results.filter((result) => !result.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length) {

@@ -1,6 +1,9 @@
 # Cloudflare Worker 定时推送
 
-这个目录是无服务器版本：Cloudflare Worker 每天北京时间 09:20 直接抓取 AI HOT 日报，生成最多 10 条「智能前沿日报」，并推送到飞书和企业微信。
+这个目录是无服务器版本，两条定时流水线并存、互不影响：
+
+1. **智能前沿日报**：每天北京时间 09:20 抓取 AI HOT 日报（最多 10 条），推送到飞书和企业微信
+2. **竞品情报速报**：每天北京时间 08:30 搜索 7 家竞品公司（钧控/灵手/大医匠/暖小贝/力驰/具身风暴/德壹）的公开新闻，推送到飞书
 
 它不依赖 GitHub Actions，也不需要你自己的服务器。
 
@@ -27,6 +30,31 @@
 AI HOT 日报按设计在北京时间 08:00 发布，但偶尔会晚：2026-09-22 的日报晚到 08:59。旧的 08:20 触发赶在发布之前，`/api/v1/dailies/{date}` 返回 404，于是整条推送降级成了英文 RSS，群里收到的就全是英文。
 
 现在触发时间留出 80 分钟余量，并且即使日报仍然缺失，降级链也会先停在中文的 AI HOT 精选池，不会再直接掉到英文源。
+
+## 竞品情报速报（08:30）
+
+每天 08:30（北京时间）搜索 7 家竞品公司的公开新闻，indigo 表头的飞书卡片，每条都带原文链接、媒体名和日期。只发飞书，不发企业微信。
+
+- 数据源：Google News RSS（主）+ Bing News RSS（辅）双引擎并行，单源失败不影响另一源；公众号/小红书/抖音/X 不做直连（API 收费或强风控），靠搜索引擎收录的转载覆盖
+- 三级降级（卡片尾注灰字自报家门）：
+  1. 7 家公司档：命中公司名即按公司分组推送，每家每天最多 3 条
+  2. 国外竞品档：公司档无新消息时，查 Aescape、AiTreat、Capsix Robotics、Phybot、Massage Robotics
+  3. 行业档：前两档都空时，查按摩/理疗/艾灸/推拿机器人行业报道
+  4. 全空也发一条灰色「今日无更新」，绝不静默；搜索引擎全部失败则发橙色告警
+- 时效窗口：默认近 24 小时（`COMPETITOR_WINDOW_HOURS` 可调 6~72）
+- 过滤两道：关键词预过滤（标题/摘要必须含公司别名）→ 智谱 GLM 判定相关性并生成一句话中文摘要；LLM 限流或失败自动退回纯关键词模式并在尾注注明，主模型 `glm-4.7-flash` 限流时自动换 `glm-4-flash` 备胎
+- 跨天去重：已推送条目的哈希存进 KV（30 天滚动），同一篇不会连着两天重复推
+- 名单与查询词都在 `src/worker.js` 顶部的 `COMPANIES` / `FOREIGN_COMPANIES` / `INDUSTRY_QUERIES` 表里，改名单不用动逻辑
+
+竞品流水线的 KV、密钥与变量：
+
+```bash
+# 创建去重用的 KV 命名空间，并把返回的 id 填进 wrangler.toml 的 COMPETITOR_STATE
+npx wrangler kv namespace create COMPETITOR_STATE
+
+# LLM 过滤用的智谱 API Key（不配置则自动退回关键词过滤，流水线照常跑）
+npx wrangler secret put ZHIPU_API_KEY
+```
 
 ## 准备
 
@@ -80,10 +108,10 @@ npx wrangler deploy
 `wrangler.toml` 中的 cron 是：
 
 ```toml
-crons = ["20 1 * * *"]
+crons = ["20 1 * * *", "30 0 * * *"]
 ```
 
-Cloudflare Cron 使用 UTC，这等于北京时间 09:20。
+Cloudflare Cron 使用 UTC，分别等于北京时间 09:20（AIHOT 日报）和 08:30（竞品速报）。
 
 ## 测试
 
@@ -93,7 +121,7 @@ Cloudflare Cron 使用 UTC，这等于北京时间 09:20。
 npm test
 ```
 
-它覆盖：正常日报路径、日报未发布时的降级路径、AI HOT 完全不可用时的 RSS 兜底，以及出站 URL 校验（拒绝环回/私有/链路本地地址和非 http(s) 协议）。测试用的 webhook 是占位地址，不会被访问。
+它覆盖：正常日报路径、日报未发布时的降级路径、AI HOT 完全不可用时的 RSS 兜底、出站 URL 校验（拒绝环回/私有/链路本地地址和非 http(s) 协议），以及竞品流水线的全部场景（公司档命中、LLM 生效与降级、三级降级链、全空灰卡、搜索源全挂橙卡、KV 去重）。测试用的 webhook 是占位地址，不会被访问。
 
 ## 手动测试
 
@@ -107,6 +135,12 @@ curl https://<worker-url>/health
 
 ```bash
 curl 'https://<worker-url>/run?dry=1'
+```
+
+竞品速报同理，加 `job=competitor`：
+
+```bash
+curl 'https://<worker-url>/run?job=competitor&dry=1'
 ```
 
 真的触发一次推送（如果配置了 `CRON_SECRET`，需要带 Authorization）：

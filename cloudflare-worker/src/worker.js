@@ -18,6 +18,123 @@ const SOURCE_NOTES = {
   "rss-fallback": "AI HOT 暂时不可用，本条来自备用 RSS 源"
 };
 
+// ---------------------------------------------------------------------------
+// 竞品情报速报（每天 08:30 北京时间，独立于上面的 AIHOT 日报）
+//
+// 名单来自《竞品运营策略分析》文档。queries 是 Google News / Bing News 的
+// 搜索串；aliases 用于关键词预过滤（LLM 不可用时的兜底）。改名单只改这几张表。
+// ---------------------------------------------------------------------------
+
+const COMPETITOR_CRON = "30 0 * * *"; // 00:30 UTC = 08:30 北京
+const COMPETITOR_TIMEOUT_MS = 15000;
+const COMPETITOR_LLM_TIMEOUT_MS = 30000;
+const COMPETITOR_LLM_CANDIDATE_CAP = 40;
+const COMPETITOR_PER_COMPANY_CAP = 3;
+const COMPETITOR_SEEN_TTL_DAYS = 30;
+const COMPETITOR_SEEN_KEY = "competitor:seen";
+const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const DEFAULT_ZHIPU_MODEL = "glm-4.7-flash";
+// 主模型限流（1305 访问量过大）时的免费备胎，按顺序尝试。
+const ZHIPU_FALLBACK_MODELS = ["glm-4-flash"];
+const COMPETITOR_LIMIT_FALLBACK = 10;
+const COMPETITOR_WINDOW_HOURS_FALLBACK = 24;
+
+const COMPANIES = [
+  {
+    name: "钧控",
+    desc: "上海钧控机器人/浙江钧控智能科技，AI 中医理疗按摩机器人",
+    aliases: ["钧控", "junctrl"],
+    queries: ['"钧控"']
+  },
+  {
+    name: "灵手",
+    desc: "深圳市灵手科技，3D 视觉理疗按摩机器人",
+    aliases: ["灵手", "lscure"],
+    queries: ['"灵手" ("机器人" OR "理疗" OR "按摩" OR "艾灸")', '"灵手科技" OR "深圳灵手"']
+  },
+  {
+    name: "大医匠",
+    desc: "深圳市大医匠科技，艾灸理疗机器人",
+    aliases: ["大医匠"],
+    queries: ['"大医匠"']
+  },
+  {
+    name: "暖小贝",
+    desc: "暖小贝（武汉海象智康/海沁医疗），共享按摩理疗机器人门店",
+    aliases: ["暖小贝", "海沁医疗"],
+    queries: ['"暖小贝" OR "海沁医疗"']
+  },
+  {
+    name: "力驰",
+    desc: "深圳力驰传感技术，按摩理疗机器人与六维力传感器",
+    aliases: ["力驰", "力驰传感"],
+    queries: ['"力驰" ("机器人" OR "理疗" OR "按摩" OR "推拿")', '"力驰传感"']
+  },
+  {
+    name: "具身风暴",
+    desc: "广东具身风暴机器人，具身智能按摩理疗机器人",
+    aliases: ["具身风暴", "俏妃AI云智护", "robotstorm"],
+    queries: ['"具身风暴" OR "俏妃AI云智护"']
+  },
+  {
+    name: "德壹",
+    desc: "深圳市德壹医疗科技，具身智能按摩理疗机器人",
+    aliases: ["德壹", "deyeemed"],
+    queries: ['"德壹医疗" OR "德壹机器人"', '"德壹" ("机器人" OR "按摩" OR "理疗" OR "艾灸")']
+  }
+];
+
+// 国外同类竞品：只在公司档当天没有新消息时才查。搜索不限语言，
+// 中文媒体对它们的报道同样会被收进来。
+const FOREIGN_COMPANIES = [
+  {
+    name: "Aescape",
+    desc: "美国纽约，AI 按摩机器人桌，已进驻 Massage Envy/Equinox",
+    aliases: ["aescape"],
+    queries: ['Aescape ("massage" OR "robot" OR "robotic")']
+  },
+  {
+    name: "AiTreat",
+    desc: "新加坡，EMMA 中医推拿机器人",
+    aliases: ["aitreat"],
+    queries: ['AiTreat ("massage" OR "robot" OR "EMMA")']
+  },
+  {
+    name: "Capsix Robotics",
+    desc: "意大利，iYU 机械臂按摩机器人（KUKA LBR Med）",
+    aliases: ["capsix", "iyu"],
+    queries: ['"Capsix Robotics"', '"iYU" ("massage" OR "robot")']
+  },
+  {
+    name: "Phybot",
+    desc: "以色列 Phybotics，LACO 机械臂按摩机器人",
+    aliases: ["phybot"],
+    queries: ['Phybot']
+  },
+  {
+    name: "Massage Robotics",
+    desc: "美国，自主按摩机器人",
+    aliases: ["massage robotics"],
+    queries: ['"Massage Robotics" ("robot" OR "massage")']
+  }
+];
+
+const INDUSTRY_GROUP = "AI 按摩机器人行业";
+const INDUSTRY_QUERIES = [
+  '"按摩机器人" OR "理疗机器人"',
+  '"艾灸机器人" OR "推拿机器人"',
+  '具身智能 ("按摩" OR "理疗" OR "康养" OR "养老")',
+  '"massage robot" OR "massage robotics"'
+];
+const INDUSTRY_FILTER_KEYWORDS = ["按摩", "理疗", "艾灸", "推拿", "刮痧", "康养", "养生", "spa"];
+
+// 卡片尾注按命中的档位生成（窗口小时数动态填入），让降级出来的卡片自报家门。
+const COMPETITOR_TIER_NOTE_BUILDERS = {
+  companies: () => "",
+  foreign: (hours) => `近 ${hours} 小时七家公司暂无新消息，本条为国外同类竞品动态`,
+  industry: (hours) => `近 ${hours} 小时公司层面暂无新消息，本条为 AI 按摩机器人行业报道`
+};
+
 const FALLBACK_FEEDS = [
   ["OpenAI", "https://openai.com/blog/rss.xml"],
   ["Hugging Face", "https://huggingface.co/blog/feed.xml"],
@@ -125,8 +242,16 @@ const PRIORITY_KEYWORDS = [
 
 export default {
   async scheduled(event, env, ctx) {
+    // Two cron pipelines coexist, each with its own code path so neither can
+    // break the other: 01:20 UTC (09:20 Beijing) runs the AIHOT digest, and
+    // 00:30 UTC (08:30 Beijing) runs the competitor report.
+    const dryRun = isTruthy(env.DRY_RUN);
+    if (event.cron === COMPETITOR_CRON) {
+      ctx.waitUntil(runCompetitorDigest(env, { trigger: "scheduled", cron: event.cron }, { dryRun }));
+      return;
+    }
     ctx.waitUntil(
-      runDigest(env, { trigger: "scheduled", cron: event.cron }, { dryRun: isTruthy(env.DRY_RUN) })
+      runDigest(env, { trigger: "scheduled", cron: event.cron }, { dryRun })
     );
   },
 
@@ -146,15 +271,20 @@ export default {
       }
 
       // dry=1 builds the full message and returns it without calling any webhook.
+      // job=competitor runs the 08:30 report instead of the AIHOT digest.
       const dryRun = isTruthy(url.searchParams.get("dry")) || isTruthy(env.DRY_RUN);
+      const job = url.searchParams.get("job") || "digest";
       try {
-        return jsonResponse(await runDigest(env, { trigger: "manual" }, { dryRun }));
+        const result = job === "competitor"
+          ? await runCompetitorDigest(env, { trigger: "manual" }, { dryRun })
+          : await runDigest(env, { trigger: "manual" }, { dryRun });
+        return jsonResponse(result);
       } catch (error) {
         return jsonResponse({ ok: false, error: errorMessage(error) }, 500);
       }
     }
 
-    return jsonResponse({ ok: true, endpoints: ["/health", "/run", "/run?dry=1"] });
+    return jsonResponse({ ok: true, endpoints: ["/health", "/run", "/run?dry=1", "/run?job=competitor&dry=1"] });
   }
 };
 
@@ -632,6 +762,10 @@ function parseFeedXml(xml, sourceName) {
       summary,
       url,
       sourceName,
+      // Google News 用 <source url="...">媒体名</source> 标注出处媒体，
+      // Bing News 用 <News:Source>；竞品流水线用它们标出处。
+      newsSource: xmlText(block, "source"),
+      newsSourceUrl: getXmlAttr(block, "source", "url"),
       author: xmlText(block, "author"),
       category: "rss",
       sectionLabel: "备用来源",
@@ -892,6 +1026,590 @@ function looksLikeSameStory(a, b) {
   const intersection = [...aa].filter((x) => bb.has(x)).length;
   const union = new Set([...aa, ...bb]).size;
   return intersection / union >= 0.42;
+}
+
+// ---------------------------------------------------------------------------
+// 竞品情报流水线：搜索 → 预过滤 → LLM 过滤 → 分组 → 飞书卡片。
+// 三级降级：七家公司 → 国外同类竞品 → 行业报道，全空也发一条“今日无更新”。
+// ---------------------------------------------------------------------------
+
+async function runCompetitorDigest(env, meta = {}, options = {}) {
+  const dryRun = Boolean(options.dryRun);
+  const limit = clampInt(env.COMPETITOR_LIMIT, 1, 20, COMPETITOR_LIMIT_FALLBACK);
+  const windowHours = clampInt(env.COMPETITOR_WINDOW_HOURS, 6, 72, COMPETITOR_WINDOW_HOURS_FALLBACK);
+  const cutoff = Date.now() - windowHours * 60 * 60 * 1000;
+  const seen = await loadSeenMarks(env);
+  const reasons = [];
+  let enginesOk = false;
+  let llmInfo = null;
+
+  const tiers = [
+    { key: "companies", companies: COMPANIES, locale: "zh" },
+    { key: "foreign", companies: FOREIGN_COMPANIES, locale: "" }
+  ];
+
+  let groups = [];
+  let tier = "";
+
+  for (const candidate of tiers) {
+    const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale);
+    if (collected.reachable) enginesOk = true;
+    if (collected.errors.length) reasons.push(`${candidate.key} 搜索 ${collected.errors.length} 个请求失败`);
+
+    const prefiltered = collected.items.filter((item) => matchesAnyAlias(item, candidate.companies));
+    const fresh = seen ? prefiltered.filter((item) => !isSeenMarked(seen, item)) : prefiltered;
+    if (!fresh.length) continue;
+
+    const filtered = await llmFilterCompetitorItems(env, fresh, candidate.companies);
+    llmInfo = { used: filtered.used, reason: filtered.reason };
+    if (!filtered.kept.length) continue;
+
+    groups = selectCompetitorGroups(candidate.companies, filtered.kept, limit);
+    if (groups.length) {
+      tier = candidate.key;
+      break;
+    }
+  }
+
+  if (!groups.length) {
+    const collected = await collectIndustryCandidates(env, cutoff);
+    if (collected.reachable) enginesOk = true;
+    if (collected.errors.length) reasons.push(`行业档搜索 ${collected.errors.length} 个请求失败`);
+
+    const fresh = seen ? collected.items.filter((item) => !isSeenMarked(seen, item)) : collected.items;
+    if (fresh.length) {
+      const filtered = await llmFilterCompetitorItems(env, fresh, []);
+      llmInfo = { used: filtered.used, reason: filtered.reason };
+      const kept = filtered.kept
+        .sort((a, b) => b.dateMs - a.dateMs)
+        .slice(0, limit)
+        .map((item) => ({ ...item, company: INDUSTRY_GROUP }));
+      if (kept.length) {
+        groups = [{ name: INDUSTRY_GROUP, items: kept }];
+        tier = "industry";
+      }
+    }
+  }
+
+  const title = `竞品情报速报（${todayInBeijing()}）`;
+
+  // Every search engine failed. Say so rather than going silent, so a missing
+  // report is never mistaken for "there was no news today".
+  if (!groups.length && !enginesOk) {
+    const notice = `竞品搜索源暂时全部不可用（统计窗口：近 ${windowHours} 小时）。${reasons.length ? reasons.join("；") : ""}`;
+    console.error(`competitor digest unavailable: ${reasons.join("; ")}`);
+    const noticePayload = buildCompetitorNoticePayload(title, notice, "orange");
+    if (dryRun) {
+      await signFeishu(env, noticePayload);
+      return {
+        ok: false,
+        job: "competitor",
+        dryRun: true,
+        tier: "",
+        count: 0,
+        title,
+        reasons,
+        feishu: { skipped: false, dryRun: true, payload: noticePayload }
+      };
+    }
+    const feishu = env.FEISHU_WEBHOOK_URL ? await sendFeishu(env, noticePayload) : { skipped: true };
+    return { ok: false, job: "competitor", tier: "", count: 0, title, reasons, feishu };
+  }
+
+  // Engines worked but nothing new surfaced in any tier: an explicit grey card.
+  if (!groups.length) {
+    const notice = `近 ${windowHours} 小时未搜到相关新闻：七家公司、国外同类竞品、行业报道均无新增。`;
+    const noticePayload = buildCompetitorNoticePayload(title, notice, "grey");
+    if (dryRun) {
+      await signFeishu(env, noticePayload);
+      return {
+        ok: true,
+        job: "competitor",
+        dryRun: true,
+        tier: "none",
+        count: 0,
+        title,
+        reasons,
+        feishu: { skipped: false, dryRun: true, payload: noticePayload }
+      };
+    }
+    const feishu = env.FEISHU_WEBHOOK_URL ? await sendFeishu(env, noticePayload) : { skipped: true };
+    return { ok: true, job: "competitor", tier: "none", count: 0, title, reasons, feishu };
+  }
+
+  const noteParts = [];
+  const tierNote = (COMPETITOR_TIER_NOTE_BUILDERS[tier] || (() => ""))(windowHours);
+  if (tierNote) noteParts.push(tierNote);
+  if (llmInfo && !llmInfo.used) noteParts.push(`LLM 过滤不可用（${llmInfo.reason}），本条按关键词过滤`);
+  if (reasons.length) noteParts.push(reasons.join("；"));
+  const note = noteParts.join("；");
+
+  const pushedItems = groups.flatMap((group) => group.items);
+  const feishuPayload = env.FEISHU_WEBHOOK_URL ? buildCompetitorFeishuPayload(title, groups, note) : null;
+
+  const summary = {
+    ok: true,
+    job: "competitor",
+    trigger: meta.trigger || "unknown",
+    cron: meta.cron || null,
+    tier,
+    llm: llmInfo,
+    title,
+    count: pushedItems.length,
+    groups: groups.map((group) => ({ company: group.name, titles: group.items.map((item) => item.title) }))
+  };
+  console.log(JSON.stringify({
+    job: "competitor",
+    tier,
+    llm: llmInfo,
+    title,
+    count: pushedItems.length,
+    groupTitles: summary.groups
+  }));
+
+  if (dryRun) {
+    // Sign it too, so the returned payload is exactly what production would post.
+    if (feishuPayload) await signFeishu(env, feishuPayload);
+    return {
+      ...summary,
+      dryRun: true,
+      feishu: feishuPayload ? { skipped: false, dryRun: true, payload: feishuPayload } : { skipped: true }
+    };
+  }
+
+  const feishuResult = feishuPayload ? await sendFeishu(env, feishuPayload) : { skipped: true };
+  // Seen marks are only written after a real push, so a dry run never burns items.
+  if (feishuResult.ok && pushedItems.length) {
+    await markSeen(env, pushedItems);
+  }
+  return { ...summary, feishu: feishuResult };
+}
+
+async function collectCompanyCandidates(env, companies, cutoff, locale) {
+  const results = await Promise.allSettled(
+    companies.flatMap((company) =>
+      company.queries.map((query) =>
+        fetchCompetitorQueryResults(env, query, cutoff, locale).then((items) =>
+          items.map((item) => ({ ...item, company: company.name }))
+        )
+      )
+    )
+  );
+
+  const items = [];
+  const errors = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") items.push(...result.value);
+    else errors.push(errorMessage(result.reason));
+  }
+  items.sort((a, b) => b.dateMs - a.dateMs);
+  return {
+    items: dedupeCompetitorItems(items),
+    errors,
+    // “引擎可用”看的是有没有请求成功，而不是搜没搜到东西——零新闻不等于全挂。
+    reachable: results.some((result) => result.status === "fulfilled")
+  };
+}
+
+async function collectIndustryCandidates(env, cutoff) {
+  const results = await Promise.allSettled(
+    INDUSTRY_QUERIES.map((query) => fetchCompetitorQueryResults(env, query, cutoff, "zh"))
+  );
+
+  const items = [];
+  const errors = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") items.push(...result.value);
+    else errors.push(errorMessage(result.reason));
+  }
+  const prefiltered = items.filter((item) => {
+    const text = `${item.title}\n${item.summary}`.toLowerCase();
+    return INDUSTRY_FILTER_KEYWORDS.some((keyword) => text.includes(keyword));
+  });
+  prefiltered.sort((a, b) => b.dateMs - a.dateMs);
+  return {
+    items: dedupeCompetitorItems(prefiltered),
+    errors,
+    reachable: results.some((result) => result.status === "fulfilled")
+  };
+}
+
+// One query hits both engines; as long as one returns items the query succeeds.
+async function fetchCompetitorQueryResults(env, query, cutoff, locale) {
+  const engines = [
+    ["google", googleNewsUrl(query, locale)],
+    ["bing", bingNewsUrl(query)]
+  ];
+  const settled = await Promise.allSettled(
+    engines.map(([name, url]) => fetchCompetitorFeed(env, name, url, cutoff))
+  );
+
+  const items = [];
+  const errors = [];
+  for (const result of settled) {
+    if (result.status === "fulfilled") items.push(...result.value);
+    else errors.push(errorMessage(result.reason));
+  }
+  if (!items.length && errors.length) throw new Error(errors.join("; "));
+  return items;
+}
+
+async function fetchCompetitorFeed(env, engineName, url, cutoff) {
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      "accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+      "user-agent": env.AIHOT_USER_AGENT || "ai-feishu-digest-worker/0.1"
+    }
+  }, COMPETITOR_TIMEOUT_MS);
+  if (!response.ok) throw new Error(`${engineName} news search failed: HTTP ${response.status}`);
+
+  const xml = await response.text();
+  return parseFeedXml(xml, engineName)
+    .filter((item) => item.title && item.url)
+    // Google/Bing always carry a pubDate; an undated item is kept rather than
+    // silently dropped, at the cost of possibly being a little older.
+    .filter((item) => !item.publishedAt || dateMs(item.publishedAt) >= cutoff)
+    .map((item) => {
+      // Google News titles end with " - 媒体名"; the <source> element already
+      // carries the media name, so strip the suffix to keep titles clean.
+      let title = item.title;
+      const media = clean(item.newsSource);
+      if (media && title.endsWith(` - ${media}`)) {
+        title = clean(title.slice(0, title.length - media.length - 3));
+      }
+      return {
+        company: "",
+        title,
+        summary: item.summary,
+        url: unwrapBingLink(item.url),
+        sourceName: media || engineName,
+        publishedAt: item.publishedAt,
+        dateMs: dateMs(item.publishedAt),
+        dateLabel: dateLabelInBeijing(item.publishedAt),
+        summaryZh: ""
+      };
+    });
+}
+
+function googleNewsUrl(query, locale) {
+  const url = new URL("https://news.google.com/rss/search");
+  url.searchParams.set("q", query);
+  if (locale) {
+    url.searchParams.set("hl", "zh-CN");
+    url.searchParams.set("gl", "CN");
+    url.searchParams.set("ceid", "CN:zh-Hans");
+  }
+  return url;
+}
+
+function bingNewsUrl(query) {
+  const url = new URL("https://www.bing.com/news/search");
+  url.searchParams.set("q", query);
+  // 必须是小写 format=rss：大写（或带 setmkt）会被 Bing 重定向到 HTML 首页。
+  url.searchParams.set("format", "rss");
+  return url;
+}
+
+// Bing RSS 的链接是 apiclick.aspx 跳转页，真实原文藏在 url 参数里；解出来
+// 直接给原文链接，出处干净且不受 Bing 跳转页改版影响。
+function unwrapBingLink(link) {
+  if (!/bing\.com\/news\/apiclick/i.test(link)) return link;
+  try {
+    const inner = new URL(link.replace(/&amp;/g, "&")).searchParams.get("url");
+    if (inner && /^https?:\/\//i.test(inner)) return inner;
+  } catch {
+    // 落回原始跳转链接
+  }
+  return link;
+}
+
+// First gate: the title/summary must contain one of the company's aliases.
+// Cheap, deterministic, and it caps how much has to go through the LLM.
+function matchesAnyAlias(item, companies) {
+  const text = `${item.title}\n${item.summary}`.toLowerCase();
+  return companies.some((company) => company.aliases.some((alias) => text.includes(alias.toLowerCase())));
+}
+
+function attributeByAlias(item, companies) {
+  const text = `${item.title}\n${item.summary}`.toLowerCase();
+  for (const company of companies) {
+    if (company.aliases.some((alias) => text.includes(alias.toLowerCase()))) return company.name;
+  }
+  return "";
+}
+
+// Second gate: one GLM call decides relevance for every candidate and writes a
+// one-line Chinese summary. Any failure degrades to keyword-only filtering.
+async function llmFilterCompetitorItems(env, items, companies) {
+  const key = clean(env.ZHIPU_API_KEY);
+  if (!key) {
+    return { kept: keywordFallbackCompetitorItems(items, companies), used: false, reason: "未配置 ZHIPU_API_KEY" };
+  }
+
+  // 序号在这里定死：prompt 里的 i 和回查判定用的是同一个下标。
+  const capped = items.slice(0, COMPETITOR_LLM_CANDIDATE_CAP)
+    .map((item, index) => ({ ...item, index: index + 1 }));
+  const payload = {
+    model: clean(env.ZHIPU_MODEL) || DEFAULT_ZHIPU_MODEL,
+    temperature: 0.1,
+    max_tokens: 4096,
+    messages: [
+      { role: "system", content: "你是竞品新闻过滤助手。只输出 JSON，不要输出任何其他内容。" },
+      { role: "user", content: buildCompetitorLlmPrompt(capped, companies) }
+    ]
+  };
+
+  let content = null;
+  let lastError = null;
+  // 依次尝试：主模型关思考（最快）→ 主模型默认参数 → 备胎模型。
+  // glm-4.7 系列默认开启思考，关掉更快，但个别版本不认识该参数。
+  const attempts = [
+    { ...payload, thinking: { type: "disabled" } },
+    payload,
+    ...ZHIPU_FALLBACK_MODELS.map((model) => ({ ...payload, model }))
+  ];
+  for (let attempt = 0; attempt < attempts.length && !content; attempt += 1) {
+    try {
+      content = await callZhipuChat(env, attempts[attempt]);
+    } catch (error) {
+      lastError = error;
+      console.error(`competitor llm attempt ${attempt + 1}/${attempts.length} failed: ${errorMessage(error)}`);
+    }
+  }
+  if (!content) {
+    return { kept: keywordFallbackCompetitorItems(items, companies), used: false, reason: errorMessage(lastError) };
+  }
+
+  const parsed = parseLlmResults(content);
+  if (!parsed) {
+    return { kept: keywordFallbackCompetitorItems(items, companies), used: false, reason: "LLM 输出无法解析" };
+  }
+
+  const byIndex = new Map(parsed.map((entry) => [Number(entry.i), entry]));
+  const names = new Set(companies.map((company) => company.name));
+  const llmKept = capped.filter((item) => {
+    const verdict = byIndex.get(item.index);
+    // A missing verdict keeps the item: better one extra item than a lost one.
+    return !verdict || verdict.keep !== false;
+  }).map((item) => {
+    const verdict = byIndex.get(item.index);
+    const company = verdict && names.has(clean(verdict.company))
+      ? clean(verdict.company)
+      : (item.company || attributeByAlias(item, companies));
+    const summaryZh = verdict ? shorten(clean(verdict.summary), 60) : "";
+    return { ...item, company, summaryZh: summaryZh || shorten(oneSentence(item.summary), 60) };
+  });
+  // 超出候选上限的条目没进过 LLM，按关键词兜底补上摘要，不丢也不静默。
+  const beyond = items.slice(COMPETITOR_LLM_CANDIDATE_CAP)
+    .map((item) => ({ ...item, summaryZh: shorten(oneSentence(item.summary), 60) }));
+  return { kept: [...llmKept, ...beyond], used: true, reason: "" };
+}
+
+async function callZhipuChat(env, payload) {
+  const response = await fetchWithTimeout(ZHIPU_CHAT_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${clean(env.ZHIPU_API_KEY)}`
+    },
+    body: JSON.stringify(payload)
+  }, COMPETITOR_LLM_TIMEOUT_MS);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`zhipu chat HTTP ${response.status}${detail ? `: ${shorten(detail, 120)}` : ""}`);
+  }
+  const data = await response.json().catch(() => null);
+  const content = data && data.choices && data.choices[0] && data.choices[0].message
+    ? data.choices[0].message.content
+    : "";
+  if (!clean(content)) throw new Error("zhipu chat returned no content");
+  return content;
+}
+
+function buildCompetitorLlmPrompt(items, companies) {
+  const targets = companies.length
+    ? companies.map((company, index) => `${index + 1}. ${company.name} —— ${company.desc}`).join("\n")
+    : "AI 按摩/理疗机器人行业（按摩机器人、理疗机器人、艾灸机器人、推拿机器人、具身智能康养等）";
+  const rule = companies.length
+    ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）。"
+    : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目。";
+  const candidates = items.map((item, index) => ({
+    i: index + 1,
+    title: item.title,
+    source: item.sourceName,
+    published: item.dateLabel,
+    snippet: shorten(item.summary, 120)
+  }));
+  return [
+    `目标主体：\n${targets}`,
+    `规则：${rule}\n相关条目用中文给出不超过 40 字的一句话摘要；不相关时 keep 为 false、摘要为空字符串。`,
+    `候选条目（JSON）：\n${JSON.stringify(candidates)}`,
+    "输出格式（覆盖全部条目，i 用原序号）：{\"results\":[{\"i\":1,\"keep\":true,\"company\":\"主体名\",\"summary\":\"一句话\"}]}"
+  ].join("\n\n");
+}
+
+function parseLlmResults(content) {
+  const text = String(content || "").replace(/```json|```/gi, "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  try {
+    const payload = JSON.parse(text.slice(start, end + 1));
+    return Array.isArray(payload.results) ? payload.results : null;
+  } catch {
+    return null;
+  }
+}
+
+function keywordFallbackCompetitorItems(items, companies) {
+  return items.map((item) => ({
+    ...item,
+    company: item.company || attributeByAlias(item, companies),
+    summaryZh: shorten(oneSentence(item.summary), 60)
+  }));
+}
+
+function selectCompetitorGroups(companies, items, limit) {
+  const groups = [];
+  let total = 0;
+  for (const company of companies) {
+    const companyItems = dedupeCompetitorItems(items.filter((item) => item.company === company.name));
+    if (!companyItems.length) continue;
+    const room = Math.min(COMPETITOR_PER_COMPANY_CAP, limit - total);
+    if (room <= 0) break;
+    const picked = companyItems.slice(0, room);
+    groups.push({ name: company.name, items: picked });
+    total += picked.length;
+  }
+  return groups;
+}
+
+// Cross-engine and cross-run dedupe: exact key, plus a stricter-than-digest
+// title similarity, so the same story from Google and Bing collapses into one.
+function dedupeCompetitorItems(items) {
+  const out = [];
+  for (const item of items) {
+    const duplicate = out.some((old) => itemKey(old) === itemKey(item) || competitorSameStory(old, item));
+    if (!duplicate) out.push(item);
+  }
+  return out;
+}
+
+function competitorSameStory(a, b) {
+  const ta = normalizeCompetitorTitle(a.title);
+  const tb = normalizeCompetitorTitle(b.title);
+  if (!ta || !tb) return false;
+  if (Math.min(ta.length, tb.length) >= 10 && (ta.includes(tb) || tb.includes(ta))) return true;
+  const aa = bigrams(ta);
+  const bb = bigrams(tb);
+  if (!aa.size || !bb.size) return false;
+  const intersection = [...aa].filter((gram) => bb.has(gram)).length;
+  return intersection / new Set([...aa, ...bb]).size >= 0.5;
+}
+
+function normalizeCompetitorTitle(title) {
+  return String(title || "").toLowerCase().replace(/[^\da-z\u4e00-\u9fff]+/g, "");
+}
+
+// Seen marks live in one KV key as {hash: firstSeenMs}, pruned on write.
+async function loadSeenMarks(env) {
+  const ns = env.COMPETITOR_STATE;
+  if (!ns || typeof ns.get !== "function") return null; // 本地/未绑定：跳过跨天去重
+  try {
+    const raw = await ns.get(COMPETITOR_SEEN_KEY);
+    const payload = raw ? JSON.parse(raw) : {};
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  } catch (error) {
+    console.error(`competitor seen load failed: ${errorMessage(error)}`);
+    return {};
+  }
+}
+
+function seenItemKey(item) {
+  return md5(`${itemKey(item)}|${normalizeCompetitorTitle(item.title)}`);
+}
+
+function isSeenMarked(marks, item) {
+  return Boolean(marks && marks[seenItemKey(item)]);
+}
+
+async function markSeen(env, items) {
+  const ns = env.COMPETITOR_STATE;
+  if (!ns || typeof ns.put !== "function" || !items.length) return;
+  try {
+    const marks = (await loadSeenMarks(env)) || {};
+    const horizon = Date.now() - COMPETITOR_SEEN_TTL_DAYS * 86400000;
+    for (const [key, ts] of Object.entries(marks)) {
+      if (Number(ts) < horizon) delete marks[key];
+    }
+    const now = Date.now();
+    for (const item of items) marks[seenItemKey(item)] = now;
+    await ns.put(COMPETITOR_SEEN_KEY, JSON.stringify(marks));
+  } catch (error) {
+    console.error(`competitor seen save failed: ${errorMessage(error)}`);
+  }
+}
+
+function buildCompetitorFeishuPayload(title, groups, note) {
+  const elements = buildCompetitorElements(groups);
+  if (note) {
+    elements.push({ tag: "hr" });
+    elements.push({
+      tag: "div",
+      text: { tag: "lark_md", content: `<font color='grey'>${escapeLark(note)}</font>` }
+    });
+  }
+  return {
+    msg_type: "interactive",
+    card: {
+      config: { wide_screen_mode: true },
+      header: {
+        template: "indigo",
+        title: { tag: "plain_text", content: title }
+      },
+      elements
+    }
+  };
+}
+
+function buildCompetitorElements(groups) {
+  const elements = [];
+  groups.forEach((group, index) => {
+    const lines = [`**【${escapeLark(group.name)}】**`];
+    group.items.forEach((item, itemIndex) => {
+      const meta = [item.sourceName, item.dateLabel].filter(Boolean).join(" · ");
+      const greyParts = [meta, item.summaryZh].filter(Boolean).map((part) => escapeLark(part)).join(" · ");
+      lines.push(`${itemIndex + 1}. [${escapeLark(shorten(item.title, 72))}](${item.url})`);
+      if (greyParts) lines.push(`<font color='grey'>${greyParts}</font>`);
+    });
+    elements.push({ tag: "div", text: { tag: "lark_md", content: lines.join("\n") } });
+    if (index !== groups.length - 1) elements.push({ tag: "hr" });
+  });
+  return elements;
+}
+
+function buildCompetitorNoticePayload(title, notice, template) {
+  return {
+    msg_type: "interactive",
+    card: {
+      config: { wide_screen_mode: true },
+      header: {
+        template: template || "grey",
+        title: { tag: "plain_text", content: title }
+      },
+      elements: [{ tag: "div", text: { tag: "lark_md", content: escapeLark(notice) } }]
+    }
+  };
+}
+
+function dateLabelInBeijing(value) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(value);
 }
 
 function buildFeishuPayload(title, items, note) {

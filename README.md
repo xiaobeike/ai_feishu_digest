@@ -19,7 +19,7 @@
 - 推送：
   - 企业微信群机器人：`WEIXIN_WEBHOOK`（默认图文卡片，超过 8 条会自动拆分）
   - 飞书群机器人：`FEISHU_WEBHOOK_URL`（默认互动卡片，可选签名）
-- Cloudflare Worker：每天 09:20（北京时间）自动执行；GitHub Actions 仅保留手动运行
+- Cloudflare Worker：每天 09:20（北京时间）推 AIHOT 日报、08:30 推竞品情报速报，两条流水线并存；GitHub Actions 仅保留手动运行
 
 ## 目录结构
 
@@ -172,7 +172,7 @@ export LLM_ALLOW_PRIVATE_HOSTS=1
 
 ## Cloudflare Worker 准点方案
 
-如果 GitHub Actions 的 schedule 延迟太久，可以改用 Cloudflare Worker。Worker 不需要自有服务器，会在 Cloudflare 上每天北京时间 09:20 直接运行并推送。
+如果 GitHub Actions 的 schedule 延迟太久，可以改用 Cloudflare Worker。Worker 不需要自有服务器，两条定时流水线并存：每天北京时间 09:20 推 AIHOT 智能前沿日报，08:30 推竞品情报速报（钧控/灵手/大医匠/暖小贝/力驰/具身风暴/德壹七家公司的公开新闻，带原文出处，三级降级：公司 → 国外同类竞品 → 行业报道）。竞品速报的来源、过滤与降级细节见 `cloudflare-worker/README.md`。
 
 > 为什么是 09:20：AI HOT 日报按设计在北京时间 08:00 发布，但偶尔会晚（2026-09-22 晚到 08:59）。旧配置 08:20 触发时日报还没发布，接口返回 404，于是整条推送降级成了英文 RSS。现在触发时间留出 80 分钟余量，并且降级链会优先用中文的 AI HOT 精选池。
 
@@ -184,6 +184,8 @@ npm install
 npx wrangler login
 npx wrangler secret put FEISHU_WEBHOOK_URL
 npx wrangler secret put WEIXIN_WEBHOOK
+npx wrangler kv namespace create COMPETITOR_STATE  # id 填进 wrangler.toml
+npx wrangler secret put ZHIPU_API_KEY              # 竞品速报的 LLM 过滤
 npx wrangler deploy
 ```
 

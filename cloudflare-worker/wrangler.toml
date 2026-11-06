@@ -3,13 +3,23 @@ main = "src/worker.js"
 compatibility_date = "2026-07-15"
 
 [triggers]
-# 01:20 UTC = 09:20 Beijing. AI HOT normally publishes the daily report at
-# 08:00-08:02 Beijing, and on 2026-09-22 it ran to 08:59 — the old 08:20 trigger
-# fired first, found no report, and fell through to the English RSS fallback.
-# 09:20 leaves 80 minutes of slack. If the report is still missing, the worker
-# now degrades to AI HOT's own Chinese selected pool instead of English feeds.
-crons = ["20 1 * * *"]
+# 两条定时流水线并存：
+# - 01:20 UTC = 北京 09:20，AIHOT 智能前沿日报（原样未动）。AI HOT 名义上 08:00
+#   发布日报，2026-09-22 那天拖到 08:59，旧的 08:20 触发会扑空并降级到英文 RSS，
+#   09:20 留出 80 分钟余量；仍缺稿时降级链停在 AI HOT 的中文精选池。
+# - 00:30 UTC = 北京 08:30，竞品情报速报（钧控/灵手/大医匠/暖小贝/力驰/具身风暴/德壹）。
+crons = ["20 1 * * *", "30 0 * * *"]
 
 [vars]
 AIHOT_USER_AGENT = "ai-feishu-digest-worker/0.1 (+https://github.com/xiaobeike/ai_feishu_digest)"
 DIGEST_LIMIT = "10"
+COMPETITOR_LIMIT = "10"
+COMPETITOR_WINDOW_HOURS = "24"
+ZHIPU_MODEL = "glm-4.7-flash"
+
+# 竞品推送的跨天去重状态（已推条目哈希，30 天滚动）。
+# 占位 id：部署前先 `npx wrangler kv namespace create COMPETITOR_STATE`
+# 拿到真实 id 换掉，否则 deploy 会失败。
+[[kv_namespaces]]
+binding = "COMPETITOR_STATE"
+id = "00000000000000000000000000000000"

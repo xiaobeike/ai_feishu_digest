@@ -6,3 +6,7 @@ __pycache__/
 .DS_Store
 cloudflare-worker/.wrangler/
 .mimosa/
+cloudflare-worker/node_modules/
+cloudflare-worker/.dev.vars
+cloudflare-worker/.dev.vars.*
+cloudflare-worker/wrangler.local.toml
