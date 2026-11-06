@@ -18,8 +18,6 @@ COMPETITOR_WINDOW_HOURS = "24"
 ZHIPU_MODEL = "glm-4.7-flash"
 
 # 竞品推送的跨天去重状态（已推条目哈希，30 天滚动）。
-# 占位 id：部署前先 `npx wrangler kv namespace create COMPETITOR_STATE`
-# 拿到真实 id 换掉，否则 deploy 会失败。
 [[kv_namespaces]]
 binding = "COMPETITOR_STATE"
-id = "00000000000000000000000000000000"
+id = "8893f401d00d4e8184dc5404a39f3df9"
