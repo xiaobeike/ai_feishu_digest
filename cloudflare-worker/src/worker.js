@@ -148,6 +148,8 @@ const FOREIGN_COMPANIES = [
 ];
 
 const INDUSTRY_GROUP = "AI 按摩机器人行业";
+// 新玩家线索要过滤掉名单内的公司，只标真正的名单外玩家。
+const KNOWN_COMPETITOR_NAMES = [...COMPANIES, ...FOREIGN_COMPANIES].map((company) => company.name.toLowerCase());
 const INDUSTRY_QUERIES = [
   '"按摩机器人" OR "理疗机器人"',
   '"艾灸机器人" OR "推拿机器人"',
@@ -1392,6 +1394,12 @@ function attributeByAlias(item, companies) {
   return "";
 }
 
+function isKnownCompetitorName(name) {
+  const lower = String(name || "").toLowerCase();
+  if (!lower) return true;
+  return KNOWN_COMPETITOR_NAMES.some((known) => lower.includes(known) || known.includes(lower));
+}
+
 // Second gate: one GLM call decides relevance for every candidate and writes a
 // one-line Chinese summary. Any failure degrades to keyword-only filtering.
 async function llmFilterCompetitorItems(env, items, companies) {
@@ -1451,9 +1459,9 @@ async function llmFilterCompetitorItems(env, items, companies) {
       ? clean(verdict.company)
       : (item.company || attributeByAlias(item, companies));
     const summaryZh = verdict ? shorten(clean(verdict.summary), 60) : "";
-    // 行业档用来顺带发现名单外的新玩家；公司档的归属已由 company 表达。
-    const newCompanies = !companies.length && verdict && Array.isArray(verdict.companies)
-      ? verdict.companies.map(clean).filter(Boolean).slice(0, 3)
+    // 全档位顺带发现名单外的新玩家；已知公司名（含子串匹配）不算线索。
+    const newCompanies = verdict && Array.isArray(verdict.companies)
+      ? verdict.companies.map(clean).filter(Boolean).filter((name) => !isKnownCompetitorName(name)).slice(0, 3)
       : [];
     return { ...item, company, summaryZh: summaryZh || shorten(oneSentence(item.summary), 60), newCompanies };
   });
@@ -1490,7 +1498,8 @@ function buildCompetitorLlmPrompt(items, companies) {
     : "AI 按摩/理疗机器人行业（按摩机器人、理疗机器人、艾灸机器人、推拿机器人、具身智能康养等）";
   const rule = companies.length
     ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）。"
-    : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目；同时提取条目中出现的具体公司/品牌名（companies 数组，尤其是做 AI 按摩理疗机器人的新玩家，最多 3 个，可为空数组）。";
+    : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目。";
+  const clueRule = "同时提取条目中出现的公司/品牌名（companies 数组，尤其是做 AI 按摩理疗机器人的新玩家，最多 3 个，可为空数组）。";
   const candidates = items.map((item, index) => ({
     i: index + 1,
     title: item.title,
@@ -1500,7 +1509,7 @@ function buildCompetitorLlmPrompt(items, companies) {
   }));
   return [
     `目标主体：\n${targets}`,
-    `规则：${rule}\n相关条目用中文给出不超过 40 字的一句话摘要；不相关时 keep 为 false、摘要为空字符串。`,
+    `规则：${rule}${clueRule}\n相关条目用中文给出不超过 40 字的一句话摘要；不相关时 keep 为 false、摘要为空字符串。`,
     `候选条目（JSON）：\n${JSON.stringify(candidates)}`,
     "输出格式（覆盖全部条目，i 用原序号）：{\"results\":[{\"i\":1,\"keep\":true,\"company\":\"主体名\",\"summary\":\"一句话\",\"companies\":[\"条目里出现的公司名\"]}]}"
   ].join("\n\n");

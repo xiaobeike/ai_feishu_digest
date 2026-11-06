@@ -316,8 +316,8 @@ function llmStubResponse(input, init) {
     // 模拟真模型的判断：含公司名但讲的是别的事（物流等）判为不相关。
     const sameNameNoise = /物流/.test(title);
     if (industryMode || (company && !sameNameNoise)) {
-      // 行业模式顺带回传新玩家线索，模拟真实的提取输出。
-      const clue = industryMode ? { companies: ["星尘康养机器人"] } : {};
+      // 全档位都回传新玩家线索，模拟真实的提取输出。
+      const clue = { companies: industryMode ? ["星尘康养机器人"] : ["某新玩家机器人"] };
       results.push({ i, keep: true, company: company || "", summary: `${company || "行业"}新闻摘要${i}`, ...clue });
     } else {
       results.push({ i, keep: false, company: "", summary: "" });
@@ -398,6 +398,7 @@ const lichiNoiseItem = () => rssItem({
     check("competitor: card carries article link", lines.some((line) => line.includes("](https://example.com/deyee-1)")), JSON.stringify(lines));
     check("competitor: card carries source media", lines.some((line) => line.includes("网易新闻")));
     check("competitor: card carries LLM summary", lines.some((line) => line.includes("新闻摘要")));
+    check("competitor: new-player clue shown in company tier", lines.some((line) => line.includes("新玩家线索：某新玩家机器人")));
     check("competitor: no degrade note", !lines.some((line) => line.includes("LLM 过滤不可用")));
     check("competitor: payload signed", typeof body.feishu.payload.sign === "string" && body.feishu.payload.sign.length > 0);
     check("competitor: dry-run leaves KV untouched", kv.store.size === 0, `kv=${kv.store.size}`);
