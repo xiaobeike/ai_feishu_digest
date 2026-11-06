@@ -29,6 +29,9 @@ const COMPETITOR_CRON = "30 0 * * *"; // 00:30 UTC = 08:30 北京
 const COMPETITOR_TIMEOUT_MS = 15000;
 const COMPETITOR_LLM_TIMEOUT_MS = 30000;
 const COMPETITOR_LLM_CANDIDATE_CAP = 40;
+// Workers 每个请求最多 6 条同时出站连接，超出的会排队并被超时器误杀；
+// 每个查询内部 google+bing 并行占 2 条，所以并发池设 3，最多 6 条。
+const COMPETITOR_QUERY_CONCURRENCY = 3;
 const COMPETITOR_PER_COMPANY_CAP = 3;
 const COMPETITOR_SEEN_TTL_DAYS = 30;
 const COMPETITOR_SEEN_KEY = "competitor:seen";
@@ -81,6 +84,31 @@ const COMPANIES = [
     desc: "深圳市德壹医疗科技，具身智能按摩理疗机器人",
     aliases: ["德壹", "deyeemed"],
     queries: ['"德壹医疗" OR "德壹机器人"', '"德壹" ("机器人" OR "按摩" OR "理疗" OR "艾灸")']
+  },
+  // ↓ 2026-11-07 市面调研补充的文档外玩家（公开报道核实）
+  {
+    name: "易启未来",
+    desc: "杭州易启未来智能科技（网易伏羲孵化），R1 智能按摩机器人，自营门店「易轻松」",
+    aliases: ["易启未来", "易轻松"],
+    queries: ['"易启未来" OR "易轻松"']
+  },
+  {
+    name: "如身机器人",
+    desc: "上海如身机器人，「修身」多合一理疗按摩机器人（无烟艾灸+电磁热疗），康养机构投放",
+    aliases: ["如身机器人", "如身科技"],
+    queries: ['"如身机器人" OR "如身科技"']
+  },
+  {
+    name: "荣泰健康",
+    desc: "荣泰健康（按摩椅龙头），RT9000 AI 按摩机器人与具身智能动向；纯财报股价类不算",
+    aliases: ["荣泰健康", "RT9000"],
+    queries: ['"荣泰健康" ("按摩机器人" OR "理疗" OR "具身智能" OR "RT9000")']
+  },
+  {
+    name: "奥佳华",
+    desc: "奥佳华 OGAWA（按摩椅龙头），OG9598/OG8598X AI 按摩机器人产品线；纯财报股价类不算",
+    aliases: ["奥佳华", "OG9598", "OG8598"],
+    queries: ['"奥佳华" ("按摩机器人" OR "AI按摩" OR "OG9598" OR "OG8598")']
   }
 ];
 
@@ -128,10 +156,10 @@ const INDUSTRY_QUERIES = [
 ];
 const INDUSTRY_FILTER_KEYWORDS = ["按摩", "理疗", "艾灸", "推拿", "刮痧", "康养", "养生", "spa"];
 
-// 卡片尾注按命中的档位生成（窗口小时数动态填入），让降级出来的卡片自报家门。
+// 卡片尾注按命中的档位生成（公司数与窗口小时数动态填入），降级出来的卡片自报家门。
 const COMPETITOR_TIER_NOTE_BUILDERS = {
   companies: () => "",
-  foreign: (hours) => `近 ${hours} 小时七家公司暂无新消息，本条为国外同类竞品动态`,
+  foreign: (hours) => `近 ${hours} 小时 ${COMPANIES.length} 家公司暂无新消息，本条为国外同类竞品动态`,
   industry: (hours) => `近 ${hours} 小时公司层面暂无新消息，本条为 AI 按摩机器人行业报道`
 };
 
@@ -1040,6 +1068,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   const cutoff = Date.now() - windowHours * 60 * 60 * 1000;
   const seen = await loadSeenMarks(env);
   const reasons = [];
+  const sampleErrors = [];
   let enginesOk = false;
   let llmInfo = null;
 
@@ -1054,7 +1083,10 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   for (const candidate of tiers) {
     const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale);
     if (collected.reachable) enginesOk = true;
-    if (collected.errors.length) reasons.push(`${candidate.key} 搜索 ${collected.errors.length} 个请求失败`);
+    if (collected.errors.length) {
+      reasons.push(`${candidate.key} 搜索 ${collected.errors.length} 个请求失败`);
+      if (sampleErrors.length < 3) sampleErrors.push(collected.errors[0]);
+    }
 
     const prefiltered = collected.items.filter((item) => matchesAnyAlias(item, candidate.companies));
     const fresh = seen ? prefiltered.filter((item) => !isSeenMarked(seen, item)) : prefiltered;
@@ -1074,7 +1106,10 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   if (!groups.length) {
     const collected = await collectIndustryCandidates(env, cutoff);
     if (collected.reachable) enginesOk = true;
-    if (collected.errors.length) reasons.push(`行业档搜索 ${collected.errors.length} 个请求失败`);
+    if (collected.errors.length) {
+      reasons.push(`行业档搜索 ${collected.errors.length} 个请求失败`);
+      if (sampleErrors.length < 3) sampleErrors.push(collected.errors[0]);
+    }
 
     const fresh = seen ? collected.items.filter((item) => !isSeenMarked(seen, item)) : collected.items;
     if (fresh.length) {
@@ -1098,6 +1133,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   if (!groups.length && !enginesOk) {
     const notice = `竞品搜索源暂时全部不可用（统计窗口：近 ${windowHours} 小时）。${reasons.length ? reasons.join("；") : ""}`;
     console.error(`competitor digest unavailable: ${reasons.join("; ")}`);
+    if (sampleErrors.length) console.error(`competitor sample errors: ${sampleErrors.slice(0, 3).join(" | ")}`);
     const noticePayload = buildCompetitorNoticePayload(title, notice, "orange");
     if (dryRun) {
       await signFeishu(env, noticePayload);
@@ -1109,6 +1145,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
         count: 0,
         title,
         reasons,
+        sampleErrors,
         feishu: { skipped: false, dryRun: true, payload: noticePayload }
       };
     }
@@ -1118,7 +1155,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
 
   // Engines worked but nothing new surfaced in any tier: an explicit grey card.
   if (!groups.length) {
-    const notice = `近 ${windowHours} 小时未搜到相关新闻：七家公司、国外同类竞品、行业报道均无新增。`;
+    const notice = `近 ${windowHours} 小时未搜到相关新闻：${COMPANIES.length} 家公司、国外同类竞品、行业报道均无新增。`;
     const noticePayload = buildCompetitorNoticePayload(title, notice, "grey");
     if (dryRun) {
       await signFeishu(env, noticePayload);
@@ -1186,19 +1223,17 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
 }
 
 async function collectCompanyCandidates(env, companies, cutoff, locale) {
-  const results = await Promise.allSettled(
-    companies.flatMap((company) =>
-      company.queries.map((query) =>
-        fetchCompetitorQueryResults(env, query, cutoff, locale).then((items) =>
-          items.map((item) => ({ ...item, company: company.name }))
-        )
-      )
-    )
+  const tasks = companies.flatMap((company) =>
+    company.queries.map((query) => ({ company: company.name, query }))
   );
+  const settled = await mapWithConcurrency(tasks, COMPETITOR_QUERY_CONCURRENCY, async (task) => {
+    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale);
+    return items.map((item) => ({ ...item, company: task.company }));
+  });
 
   const items = [];
   const errors = [];
-  for (const result of results) {
+  for (const result of settled) {
     if (result.status === "fulfilled") items.push(...result.value);
     else errors.push(errorMessage(result.reason));
   }
@@ -1207,18 +1242,37 @@ async function collectCompanyCandidates(env, companies, cutoff, locale) {
     items: dedupeCompetitorItems(items),
     errors,
     // “引擎可用”看的是有没有请求成功，而不是搜没搜到东西——零新闻不等于全挂。
-    reachable: results.some((result) => result.status === "fulfilled")
+    reachable: settled.some((result) => result.status === "fulfilled")
   };
 }
 
+// Promise.allSettled + 有界并发：保持 allSettled 语义，同时不让出站连接超限。
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await mapper(items[index]).then(
+        (value) => ({ status: "fulfilled", value }),
+        (reason) => ({ status: "rejected", reason })
+      );
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function collectIndustryCandidates(env, cutoff) {
-  const results = await Promise.allSettled(
-    INDUSTRY_QUERIES.map((query) => fetchCompetitorQueryResults(env, query, cutoff, "zh"))
+  const settled = await mapWithConcurrency(INDUSTRY_QUERIES, COMPETITOR_QUERY_CONCURRENCY, (query) =>
+    fetchCompetitorQueryResults(env, query, cutoff, "zh")
   );
 
   const items = [];
   const errors = [];
-  for (const result of results) {
+  for (const result of settled) {
     if (result.status === "fulfilled") items.push(...result.value);
     else errors.push(errorMessage(result.reason));
   }
@@ -1230,7 +1284,7 @@ async function collectIndustryCandidates(env, cutoff) {
   return {
     items: dedupeCompetitorItems(prefiltered),
     errors,
-    reachable: results.some((result) => result.status === "fulfilled")
+    reachable: settled.some((result) => result.status === "fulfilled")
   };
 }
 
@@ -1397,7 +1451,11 @@ async function llmFilterCompetitorItems(env, items, companies) {
       ? clean(verdict.company)
       : (item.company || attributeByAlias(item, companies));
     const summaryZh = verdict ? shorten(clean(verdict.summary), 60) : "";
-    return { ...item, company, summaryZh: summaryZh || shorten(oneSentence(item.summary), 60) };
+    // 行业档用来顺带发现名单外的新玩家；公司档的归属已由 company 表达。
+    const newCompanies = !companies.length && verdict && Array.isArray(verdict.companies)
+      ? verdict.companies.map(clean).filter(Boolean).slice(0, 3)
+      : [];
+    return { ...item, company, summaryZh: summaryZh || shorten(oneSentence(item.summary), 60), newCompanies };
   });
   // 超出候选上限的条目没进过 LLM，按关键词兜底补上摘要，不丢也不静默。
   const beyond = items.slice(COMPETITOR_LLM_CANDIDATE_CAP)
@@ -1432,7 +1490,7 @@ function buildCompetitorLlmPrompt(items, companies) {
     : "AI 按摩/理疗机器人行业（按摩机器人、理疗机器人、艾灸机器人、推拿机器人、具身智能康养等）";
   const rule = companies.length
     ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）。"
-    : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目。";
+    : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目；同时提取条目中出现的具体公司/品牌名（companies 数组，尤其是做 AI 按摩理疗机器人的新玩家，最多 3 个，可为空数组）。";
   const candidates = items.map((item, index) => ({
     i: index + 1,
     title: item.title,
@@ -1444,28 +1502,42 @@ function buildCompetitorLlmPrompt(items, companies) {
     `目标主体：\n${targets}`,
     `规则：${rule}\n相关条目用中文给出不超过 40 字的一句话摘要；不相关时 keep 为 false、摘要为空字符串。`,
     `候选条目（JSON）：\n${JSON.stringify(candidates)}`,
-    "输出格式（覆盖全部条目，i 用原序号）：{\"results\":[{\"i\":1,\"keep\":true,\"company\":\"主体名\",\"summary\":\"一句话\"}]}"
+    "输出格式（覆盖全部条目，i 用原序号）：{\"results\":[{\"i\":1,\"keep\":true,\"company\":\"主体名\",\"summary\":\"一句话\",\"companies\":[\"条目里出现的公司名\"]}]}"
   ].join("\n\n");
 }
 
 function parseLlmResults(content) {
   const text = String(content || "").replace(/```json|```/gi, "");
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) return null;
-  try {
-    const payload = JSON.parse(text.slice(start, end + 1));
-    return Array.isArray(payload.results) ? payload.results : null;
-  } catch {
-    return null;
+  // 首选 {"results":[...]}；模型偶尔直接回一个裸数组，也接住。
+  const objStart = text.indexOf("{");
+  const objEnd = text.lastIndexOf("}");
+  if (objStart !== -1 && objEnd > objStart) {
+    try {
+      const payload = JSON.parse(text.slice(objStart, objEnd + 1));
+      if (Array.isArray(payload.results)) return payload.results;
+    } catch {
+      // 落到下面的数组解析
+    }
   }
+  const arrStart = text.indexOf("[");
+  const arrEnd = text.lastIndexOf("]");
+  if (arrStart !== -1 && arrEnd > arrStart) {
+    try {
+      const parsed = JSON.parse(text.slice(arrStart, arrEnd + 1));
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // 交给调用方按解析失败降级
+    }
+  }
+  return null;
 }
 
 function keywordFallbackCompetitorItems(items, companies) {
   return items.map((item) => ({
     ...item,
     company: item.company || attributeByAlias(item, companies),
-    summaryZh: shorten(oneSentence(item.summary), 60)
+    summaryZh: shorten(oneSentence(item.summary), 60),
+    newCompanies: []
   }));
 }
 
@@ -1578,7 +1650,8 @@ function buildCompetitorElements(groups) {
     const lines = [`**【${escapeLark(group.name)}】**`];
     group.items.forEach((item, itemIndex) => {
       const meta = [item.sourceName, item.dateLabel].filter(Boolean).join(" · ");
-      const greyParts = [meta, item.summaryZh].filter(Boolean).map((part) => escapeLark(part)).join(" · ");
+      const clue = item.newCompanies && item.newCompanies.length ? `新玩家线索：${item.newCompanies.join("、")}` : "";
+      const greyParts = [meta, item.summaryZh, clue].filter(Boolean).map((part) => escapeLark(part)).join(" · ");
       lines.push(`${itemIndex + 1}. [${escapeLark(shorten(item.title, 72))}](${item.url})`);
       if (greyParts) lines.push(`<font color='grey'>${greyParts}</font>`);
     });
@@ -1812,6 +1885,7 @@ function decodeXml(value) {
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, "\"")
     .replace(/&#39;/g, "'")

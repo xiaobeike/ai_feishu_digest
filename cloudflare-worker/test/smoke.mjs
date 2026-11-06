@@ -305,7 +305,7 @@ function llmStubResponse(input, init) {
   const body = JSON.parse(String(init?.body || "{}"));
   const user = body.messages ? body.messages[body.messages.length - 1].content : "";
   const results = [];
-  const names = ["钧控", "灵手", "大医匠", "暖小贝", "力驰", "具身风暴", "德壹", "Aescape", "AiTreat", "Capsix Robotics", "Phybot", "Massage Robotics"];
+  const names = ["钧控", "灵手", "大医匠", "暖小贝", "力驰", "具身风暴", "德壹", "易启未来", "如身机器人", "荣泰健康", "奥佳华", "Aescape", "AiTreat", "Capsix Robotics", "Phybot", "Massage Robotics"];
   const industryMode = user.includes("AI 按摩/理疗机器人行业");
   const re = /"i":(\d+),"title":"((?:[^"\\]|\\.)*)"/g;
   let match;
@@ -316,7 +316,9 @@ function llmStubResponse(input, init) {
     // 模拟真模型的判断：含公司名但讲的是别的事（物流等）判为不相关。
     const sameNameNoise = /物流/.test(title);
     if (industryMode || (company && !sameNameNoise)) {
-      results.push({ i, keep: true, company: company || "", summary: `${company || "行业"}新闻摘要${i}` });
+      // 行业模式顺带回传新玩家线索，模拟真实的提取输出。
+      const clue = industryMode ? { companies: ["星尘康养机器人"] } : {};
+      results.push({ i, keep: true, company: company || "", summary: `${company || "行业"}新闻摘要${i}`, ...clue });
     } else {
       results.push({ i, keep: false, company: "", summary: "" });
     }
@@ -475,6 +477,7 @@ const lichiNoiseItem = () => rssItem({
     check("industry: downgrades to industry tier", body.tier === "industry", `tier=${body.tier}`);
     check("industry: card notes the downgrade", cardLines(body.feishu.payload).some((line) => line.includes("行业报道")));
     check("industry: grouped under industry", body.groups[0] && body.groups[0].company === "AI 按摩机器人行业", JSON.stringify(body.groups));
+    check("industry: new-player clue shown", cardLines(body.feishu.payload).some((line) => line.includes("新玩家线索：星尘康养机器人")), JSON.stringify(cardLines(body.feishu.payload)));
   } finally {
     globalThis.fetch = realFetch;
   }
