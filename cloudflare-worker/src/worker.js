@@ -311,11 +311,13 @@ export default {
 
       // dry=1 builds the full message and returns it without calling any webhook.
       // job=competitor runs the 08:30 report instead of the AIHOT digest.
+      // window=N overrides the competitor freshness window (hours) for manual catch-up pushes.
       const dryRun = isTruthy(url.searchParams.get("dry")) || isTruthy(env.DRY_RUN);
       const job = url.searchParams.get("job") || "digest";
+      const windowOverride = url.searchParams.get("window");
       try {
         const result = job === "competitor"
-          ? await runCompetitorDigest(env, { trigger: "manual" }, { dryRun })
+          ? await runCompetitorDigest(env, { trigger: "manual" }, { dryRun, windowHours: windowOverride })
           : await runDigest(env, { trigger: "manual" }, { dryRun });
         return jsonResponse(result);
       } catch (error) {
@@ -1075,7 +1077,11 @@ function looksLikeSameStory(a, b) {
 async function runCompetitorDigest(env, meta = {}, options = {}) {
   const dryRun = Boolean(options.dryRun);
   const limit = clampInt(env.COMPETITOR_LIMIT, 1, 20, COMPETITOR_LIMIT_FALLBACK);
-  const windowHours = clampInt(env.COMPETITOR_WINDOW_HOURS, 6, 72, COMPETITOR_WINDOW_HOURS_FALLBACK);
+  // 手动补推可用 ?window=N 覆盖时效窗口（小时）；定时触发走配置值。
+  const windowHours = clampInt(
+    options.windowHours != null && options.windowHours !== "" ? options.windowHours : env.COMPETITOR_WINDOW_HOURS,
+    6, 72, COMPETITOR_WINDOW_HOURS_FALLBACK
+  );
   const cutoff = Date.now() - windowHours * 60 * 60 * 1000;
   const seen = await loadSeenMarks(env);
   const reasons = [];
@@ -1205,6 +1211,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
     cron: meta.cron || null,
     tier,
     llm: llmInfo,
+    windowHours,
     title,
     count: pushedItems.length,
     groups: groups.map((group) => ({ company: group.name, titles: group.items.map((item) => item.title) }))
@@ -1213,6 +1220,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
     job: "competitor",
     tier,
     llm: llmInfo,
+    windowHours,
     title,
     count: pushedItems.length,
     groupTitles: summary.groups
@@ -1331,6 +1339,7 @@ async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker, 
   }
   rescue.remaining -= 1;
   try {
+    console.log(JSON.stringify({ rescue: "fired", query: rescueQuery, rssErrors: errors.length }));
     const rescued = await fetchDeepSeekSearchResults(env, rescueQuery, cutoff);
     if (rescued.length) return rescued;
   } catch (error) {
