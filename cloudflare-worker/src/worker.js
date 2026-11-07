@@ -48,8 +48,10 @@ const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const DEFAULT_ZHIPU_MODEL = "glm-4.7-flash";
 // 主模型限流（1305 访问量过大）时的免费备胎，按顺序尝试。
 const ZHIPU_FALLBACK_MODELS = ["glm-4-flash"];
-const COMPETITOR_LIMIT_FALLBACK = 5;
+const COMPETITOR_LIMIT_FALLBACK = 10;
 const COMPETITOR_WINDOW_HOURS_FALLBACK = 24;
+// 公司/国外条目不足 5 条时，用行业新闻补位到 5 条；新闻充足时不补位，总量上限 COMPETITOR_LIMIT。
+const COMPETITOR_FILL_TARGET = 5;
 
 const COMPANIES = [
   {
@@ -1095,7 +1097,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
     return seen ? prefiltered.filter((item) => !isSeenMarked(seen, item)) : prefiltered;
   };
 
-  // —— 第一优先：11 家公司（直链优先，Google 跳转链接兜底，不舍弃）——
+  // —— 第一优先：11 家公司，有多少推多少（上限 limit=10，直链优先，跳转链接兜底）——
   const companyFresh = await collectOneTier(COMPANIES, "zh", "公司档");
   let companyGroups = [];
   let companyLlm = null;
@@ -1113,15 +1115,15 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
     if (foreignFresh.length) {
       const filtered = await llmFilterCompetitorItems(env, foreignFresh, FOREIGN_COMPANIES);
       foreignLlm = { used: filtered.used, reason: filtered.reason };
-      foreignGroups = selectCompetitorGroups(FOREIGN_COMPANIES, filtered.kept, limit);
+      foreignGroups = selectCompetitorGroups(FOREIGN_COMPANIES, filtered.kept, COMPETITOR_FILL_TARGET);
     }
   }
 
-  // —— 行业新闻补位：凑满 limit 条 ——
+  // —— 行业新闻补位：公司/国外条目不足 5 条时，凑满 5 条 ——
   const pushedSoFar = [...companyGroups, ...foreignGroups].flatMap((group) => group.items);
   let industryItems = [];
   let industryLlm = null;
-  const room = limit - pushedSoFar.length;
+  const room = COMPETITOR_FILL_TARGET - pushedSoFar.length;
   if (room > 0) {
     const industryCollected = await collectIndustryCandidates(env, cutoff, breaker, rescue);
     if (industryCollected.reachable) enginesOk = true;

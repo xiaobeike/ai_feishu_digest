@@ -608,7 +608,7 @@ const lichiNoiseItem = () => rssItem({
     const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", DEEPSEEK_API_KEY: "test-ds-key" }, "?job=competitor&dry=1");
     check("deepseek rescue: budget covers all 11 companies", deepseekCalls === 11, `calls=${deepseekCalls}`);
     // 凑满 COMPETITOR_LIMIT=5 即停（公司档优先，不再行业补位）。
-    check("deepseek rescue: items land in companies tier", body.tier === "companies" && body.count === 5 && body.groups.length === 5, `tier=${body.tier} count=${body.count} groups=${body.groups.length}`);
+    check("deepseek rescue: items land in companies tier", body.tier === "companies" && body.count === 10 && body.groups.length === 10, `tier=${body.tier} count=${body.count} groups=${body.groups.length}`);
     check("deepseek rescue: grouped by company", body.groups[0] && body.groups[0].company === "钧控" && body.groups.every((group) => group.titles.length === 1), JSON.stringify(body.groups).slice(0, 120));
     check("deepseek rescue: source media shown", cardLines(body.feishu.payload).some((line) => line.includes("36氪")));
   } finally {
