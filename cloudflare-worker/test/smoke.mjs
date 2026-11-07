@@ -581,6 +581,41 @@ const lichiNoiseItem = () => rssItem({
   }
 }
 
+// 18. RSS 双引擎零结果：DeepSeek 救援引擎补搜，且受单次运行预算封顶。
+{
+  const realFetch = globalThis.fetch;
+  let deepseekCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    if (url.includes("api.deepseek.com")) {
+      deepseekCalls += 1;
+      const body = JSON.parse(String(init?.body || "{}"));
+      const query = String(body.query || "");
+      return new Response(JSON.stringify({
+        results: [{
+          title: `补搜${query.slice(0, 10)}`,
+          url: `https://example.com/ds-${deepseekCalls}`,
+          snippet: "DeepSeek 补搜到的新闻摘要。",
+          site_name: "36氪",
+          date: new Date(Date.now() - 7200000).toISOString()
+        }]
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return searchStub()(input);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", DEEPSEEK_API_KEY: "test-ds-key" }, "?job=competitor&dry=1");
+    check("deepseek rescue: budget caps the calls", deepseekCalls === 10, `calls=${deepseekCalls}`);
+    // 灵手/力驰/德壹各有多条查询但救援词相同，补搜结果去重后 11 家剩 7 家有条目。
+    check("deepseek rescue: items land in companies tier", body.tier === "companies" && body.count === 7, `tier=${body.tier} count=${body.count}`);
+    check("deepseek rescue: grouped by company", body.groups.some((group) => group.company === "德壹" && group.titles.length === 1), JSON.stringify(body.groups).slice(0, 120));
+    check("deepseek rescue: source media shown", cardLines(body.feishu.payload).some((line) => line.includes("36氪")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 const failed = results.filter((result) => !result.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length) {

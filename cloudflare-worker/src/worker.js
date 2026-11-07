@@ -37,6 +37,10 @@ const COMPETITOR_QUERY_CONCURRENCY = 3;
 const NEWS_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const NEWS_PROXY_PREFIX = "https://api.allorigins.win/raw?url=";
 const ENGINE_BREAKER_THRESHOLD = 3;
+// DeepSeek Search 作为救援引擎：RSS 双引擎（含代理）失败或零结果时补搜一次。
+// 0.005 元/次、无结果不计费；单次运行最多发 RESCUE_BUDGET 次，控制子请求与费用。
+const DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search";
+const DEEPSEEK_RESCUE_BUDGET = 10;
 const COMPETITOR_PER_COMPANY_CAP = 3;
 const COMPETITOR_SEEN_TTL_DAYS = 30;
 const COMPETITOR_SEEN_KEY = "competitor:seen";
@@ -1078,6 +1082,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   const sampleErrors = [];
   // 引擎熔断状态：本运行内直连连续失败的次数，跨查询共享。
   const breaker = { google: 0, bing: 0 };
+  const rescue = { remaining: DEEPSEEK_RESCUE_BUDGET };
   let enginesOk = false;
   let llmInfo = null;
 
@@ -1090,7 +1095,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   let tier = "";
 
   for (const candidate of tiers) {
-    const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale, breaker);
+    const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale, breaker, rescue);
     if (collected.reachable) enginesOk = true;
     if (collected.errors.length) {
       reasons.push(`${candidate.key} 搜索 ${collected.errors.length} 个请求失败`);
@@ -1113,7 +1118,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   }
 
   if (!groups.length) {
-    const collected = await collectIndustryCandidates(env, cutoff, breaker);
+    const collected = await collectIndustryCandidates(env, cutoff, breaker, rescue);
     if (collected.reachable) enginesOk = true;
     if (collected.errors.length) {
       reasons.push(`行业档搜索 ${collected.errors.length} 个请求失败`);
@@ -1231,12 +1236,12 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   return { ...summary, feishu: feishuResult };
 }
 
-async function collectCompanyCandidates(env, companies, cutoff, locale, breaker) {
+async function collectCompanyCandidates(env, companies, cutoff, locale, breaker, rescue) {
   const tasks = companies.flatMap((company) =>
-    company.queries.map((query) => ({ company: company.name, query }))
+    company.queries.map((query) => ({ company: company.name, query, rescueQuery: `"${company.aliases[0]}"` }))
   );
   const settled = await mapWithConcurrency(tasks, COMPETITOR_QUERY_CONCURRENCY, async (task) => {
-    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale, breaker);
+    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale, breaker, rescue, task.rescueQuery);
     return items.map((item) => ({ ...item, company: task.company }));
   });
 
@@ -1274,9 +1279,9 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-async function collectIndustryCandidates(env, cutoff, breaker) {
+async function collectIndustryCandidates(env, cutoff, breaker, rescue) {
   const settled = await mapWithConcurrency(INDUSTRY_QUERIES, COMPETITOR_QUERY_CONCURRENCY, (query) =>
-    fetchCompetitorQueryResults(env, query, cutoff, "zh", breaker)
+    fetchCompetitorQueryResults(env, query, cutoff, "zh", breaker, rescue, '"按摩机器人"')
   );
 
   const items = [];
@@ -1298,7 +1303,9 @@ async function collectIndustryCandidates(env, cutoff, breaker) {
 }
 
 // One query hits both engines; as long as one returns items the query succeeds.
-async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker) {
+// RSS 全失败或零结果时，用 DeepSeek Search 补搜一次（成功才计费），受单次运行
+// 的救援预算约束；未配置 DEEPSEEK_API_KEY 时静默跳过。
+async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker, rescue, rescueQuery) {
   const engines = [
     ["google", googleNewsUrl(query, locale)],
     ["bing", bingNewsUrl(query)]
@@ -1313,8 +1320,61 @@ async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker) 
     if (result.status === "fulfilled") items.push(...result.value);
     else errors.push(errorMessage(result.reason));
   }
-  if (!items.length && errors.length) throw new Error(errors.join("; "));
+  if (items.length || !rescueQuery) {
+    if (!items.length && errors.length) throw new Error(errors.join("; "));
+    return items;
+  }
+
+  if (!clean(env.DEEPSEEK_API_KEY) || rescue.remaining <= 0) {
+    if (errors.length) throw new Error(errors.join("; "));
+    return items;
+  }
+  rescue.remaining -= 1;
+  try {
+    const rescued = await fetchDeepSeekSearchResults(env, rescueQuery, cutoff);
+    if (rescued.length) return rescued;
+  } catch (error) {
+    errors.push(`deepseek rescue: ${errorMessage(error)}`);
+  }
+  if (errors.length) throw new Error(errors.join("; "));
   return items;
+}
+
+// DeepSeek Search 救援：query 上限 128 字符，追加 after: 日期对齐时效窗口。
+async function fetchDeepSeekSearchResults(env, query, cutoff) {
+  const key = clean(env.DEEPSEEK_API_KEY);
+  if (!key) return [];
+  const after = ` after:${dateLabelInBeijing(new Date(cutoff))}`;
+  const response = await fetchWithTimeout(DEEPSEEK_SEARCH_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${key}`
+    },
+    body: JSON.stringify({ query: `${query}${after}`.slice(0, 128), count: 10 })
+  }, COMPETITOR_TIMEOUT_MS);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`deepseek search HTTP ${response.status}${detail ? `: ${shorten(detail, 100)}` : ""}`);
+  }
+  const data = await response.json().catch(() => null);
+  const results = data && Array.isArray(data.results) ? data.results : [];
+  return results.map((entry) => {
+    const published = parseDate(entry.date);
+    return {
+      company: "",
+      title: clean(entry.title),
+      summary: clean(entry.snippet || entry.summary),
+      url: clean(entry.url),
+      sourceName: clean(entry.site_name) || "DeepSeek 搜索",
+      publishedAt: published,
+      dateMs: dateMs(published),
+      dateLabel: dateLabelInBeijing(published),
+      summaryZh: ""
+    };
+  })
+    .filter((item) => item.title && item.url)
+    .filter((item) => !item.publishedAt || dateMs(item.publishedAt) >= cutoff);
 }
 
 // 单引擎抓取：直连 → 失败抖动重试 → 连续失败熔断后走公共代理。
