@@ -40,7 +40,7 @@ const ENGINE_BREAKER_THRESHOLD = 3;
 // DeepSeek Search 作为救援引擎：RSS 双引擎（含代理）失败或零结果时补搜一次。
 // 0.005 元/次、无结果不计费；单次运行最多发 RESCUE_BUDGET 次，控制子请求与费用。
 const DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search";
-const DEEPSEEK_RESCUE_BUDGET = 10;
+const DEEPSEEK_RESCUE_BUDGET = 12;
 const COMPETITOR_PER_COMPANY_CAP = 3;
 const COMPETITOR_SEEN_TTL_DAYS = 30;
 const COMPETITOR_SEEN_KEY = "competitor:seen";
@@ -48,7 +48,7 @@ const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const DEFAULT_ZHIPU_MODEL = "glm-4.7-flash";
 // 主模型限流（1305 访问量过大）时的免费备胎，按顺序尝试。
 const ZHIPU_FALLBACK_MODELS = ["glm-4-flash"];
-const COMPETITOR_LIMIT_FALLBACK = 10;
+const COMPETITOR_LIMIT_FALLBACK = 5;
 const COMPETITOR_WINDOW_HOURS_FALLBACK = 24;
 
 const COMPANIES = [
@@ -62,7 +62,7 @@ const COMPANIES = [
     name: "灵手",
     desc: "深圳市灵手科技，3D 视觉理疗按摩机器人",
     aliases: ["灵手", "lscure"],
-    queries: ['"灵手" ("机器人" OR "理疗" OR "按摩" OR "艾灸")', '"灵手科技" OR "深圳灵手"']
+    queries: ['"灵手" ("机器人" OR "理疗" OR "按摩" OR "艾灸" OR "科技")']
   },
   {
     name: "大医匠",
@@ -80,7 +80,7 @@ const COMPANIES = [
     name: "力驰",
     desc: "深圳力驰传感技术，按摩理疗机器人与六维力传感器",
     aliases: ["力驰", "力驰传感"],
-    queries: ['"力驰" ("机器人" OR "理疗" OR "按摩" OR "推拿")', '"力驰传感"']
+    queries: ['"力驰" ("机器人" OR "理疗" OR "按摩" OR "推拿" OR "传感")']
   },
   {
     name: "具身风暴",
@@ -92,7 +92,7 @@ const COMPANIES = [
     name: "德壹",
     desc: "深圳市德壹医疗科技，具身智能按摩理疗机器人",
     aliases: ["德壹", "deyeemed"],
-    queries: ['"德壹医疗" OR "德壹机器人"', '"德壹" ("机器人" OR "按摩" OR "理疗" OR "艾灸")']
+    queries: ['"德壹" ("机器人" OR "按摩" OR "理疗" OR "艾灸" OR "医疗")']
   },
   // ↓ 2026-11-07 市面调研补充的文档外玩家（公开报道核实）
   {
@@ -166,13 +166,6 @@ const INDUSTRY_QUERIES = [
   '"massage robot" OR "massage robotics"'
 ];
 const INDUSTRY_FILTER_KEYWORDS = ["按摩", "理疗", "艾灸", "推拿", "刮痧", "康养", "养生", "spa"];
-
-// 卡片尾注按命中的档位生成（公司数与窗口小时数动态填入），降级出来的卡片自报家门。
-const COMPETITOR_TIER_NOTE_BUILDERS = {
-  companies: () => "",
-  foreign: (hours) => `近 ${hours} 小时 ${COMPANIES.length} 家公司暂无新消息，本条为国外同类竞品动态`,
-  industry: (hours) => `近 ${hours} 小时公司层面暂无新消息，本条为 AI 按摩机器人行业报道`
-};
 
 const FALLBACK_FEEDS = [
   ["OpenAI", "https://openai.com/blog/rss.xml"],
@@ -1090,61 +1083,70 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   const breaker = { google: 0, bing: 0 };
   const rescue = { remaining: DEEPSEEK_RESCUE_BUDGET };
   let enginesOk = false;
-  let llmInfo = null;
 
-  const tiers = [
-    { key: "companies", companies: COMPANIES, locale: "zh" },
-    { key: "foreign", companies: FOREIGN_COMPANIES, locale: "" }
-  ];
-
-  let groups = [];
-  let tier = "";
-
-  for (const candidate of tiers) {
-    const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale, breaker, rescue);
+  const collectOneTier = async (companies, locale, label) => {
+    const collected = await collectCompanyCandidates(env, companies, cutoff, locale, breaker, rescue);
     if (collected.reachable) enginesOk = true;
     if (collected.errors.length) {
-      reasons.push(`${candidate.key} 搜索 ${collected.errors.length} 个请求失败`);
+      reasons.push(`${label}搜索 ${collected.errors.length} 个请求失败`);
       if (sampleErrors.length < 3) sampleErrors.push(collected.errors[0]);
     }
+    const prefiltered = collected.items.filter((item) => matchesAnyAlias(item, companies));
+    return seen ? prefiltered.filter((item) => !isSeenMarked(seen, item)) : prefiltered;
+  };
 
-    const prefiltered = collected.items.filter((item) => matchesAnyAlias(item, candidate.companies));
-    const fresh = seen ? prefiltered.filter((item) => !isSeenMarked(seen, item)) : prefiltered;
-    if (!fresh.length) continue;
+  // —— 第一优先：11 家公司（直链优先，Google 跳转链接兜底，不舍弃）——
+  const companyFresh = await collectOneTier(COMPANIES, "zh", "公司档");
+  let companyGroups = [];
+  let companyLlm = null;
+  if (companyFresh.length) {
+    const filtered = await llmFilterCompetitorItems(env, companyFresh, COMPANIES);
+    companyLlm = { used: filtered.used, reason: filtered.reason };
+    companyGroups = selectCompetitorGroups(COMPANIES, filtered.kept, limit);
+  }
 
-    const filtered = await llmFilterCompetitorItems(env, fresh, candidate.companies);
-    llmInfo = { used: filtered.used, reason: filtered.reason };
-    if (!filtered.kept.length) continue;
-
-    groups = selectCompetitorGroups(candidate.companies, filtered.kept, limit);
-    if (groups.length) {
-      tier = candidate.key;
-      break;
+  // —— 第二优先：国外同类竞品（仅当公司层面一条都没有时）——
+  let foreignGroups = [];
+  let foreignLlm = null;
+  if (!companyGroups.length) {
+    const foreignFresh = await collectOneTier(FOREIGN_COMPANIES, "", "国外竞品档");
+    if (foreignFresh.length) {
+      const filtered = await llmFilterCompetitorItems(env, foreignFresh, FOREIGN_COMPANIES);
+      foreignLlm = { used: filtered.used, reason: filtered.reason };
+      foreignGroups = selectCompetitorGroups(FOREIGN_COMPANIES, filtered.kept, limit);
     }
   }
 
-  if (!groups.length) {
-    const collected = await collectIndustryCandidates(env, cutoff, breaker, rescue);
-    if (collected.reachable) enginesOk = true;
-    if (collected.errors.length) {
-      reasons.push(`行业档搜索 ${collected.errors.length} 个请求失败`);
-      if (sampleErrors.length < 3) sampleErrors.push(collected.errors[0]);
+  // —— 行业新闻补位：凑满 limit 条 ——
+  const pushedSoFar = [...companyGroups, ...foreignGroups].flatMap((group) => group.items);
+  let industryItems = [];
+  let industryLlm = null;
+  const room = limit - pushedSoFar.length;
+  if (room > 0) {
+    const industryCollected = await collectIndustryCandidates(env, cutoff, breaker, rescue);
+    if (industryCollected.reachable) enginesOk = true;
+    if (industryCollected.errors.length) {
+      reasons.push(`行业档搜索 ${industryCollected.errors.length} 个请求失败`);
+      if (sampleErrors.length < 3) sampleErrors.push(industryCollected.errors[0]);
     }
-
-    const fresh = seen ? collected.items.filter((item) => !isSeenMarked(seen, item)) : collected.items;
-    if (fresh.length) {
-      const filtered = await llmFilterCompetitorItems(env, fresh, []);
-      llmInfo = { used: filtered.used, reason: filtered.reason };
-      const kept = filtered.kept
-        .sort((a, b) => b.dateMs - a.dateMs)
-        .slice(0, limit)
+    const industryFresh = seen ? industryCollected.items.filter((item) => !isSeenMarked(seen, item)) : industryCollected.items;
+    if (industryFresh.length) {
+      const filtered = await llmFilterCompetitorItems(env, industryFresh, []);
+      industryLlm = { used: filtered.used, reason: filtered.reason };
+      // 与已选公司/国外条目去重，直链优先，Google 跳转链接兜底。
+      const linkQuality = (item) => (isGoogleNewsRedirect(item.url) ? 0 : 1);
+      industryItems = filtered.kept
+        .filter((item) => !pushedSoFar.some((old) => itemKey(old) === itemKey(item) || competitorSameStory(old, item)))
+        .sort((a, b) => linkQuality(b) - linkQuality(a) || b.dateMs - a.dateMs)
+        .slice(0, room)
         .map((item) => ({ ...item, company: INDUSTRY_GROUP }));
-      if (kept.length) {
-        groups = [{ name: INDUSTRY_GROUP, items: kept }];
-        tier = "industry";
-      }
     }
   }
+
+  const groups = [...companyGroups, ...foreignGroups];
+  if (industryItems.length) groups.push({ name: INDUSTRY_GROUP, items: industryItems });
+  const tier = companyGroups.length ? "companies" : foreignGroups.length ? "foreign" : industryItems.length ? "industry" : "none";
+  const llmInfo = companyGroups.length ? companyLlm : foreignGroups.length ? foreignLlm : industryLlm;
 
   const title = `竞品情报速报（${todayInBeijing()}）`;
 
@@ -1173,7 +1175,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
     return { ok: false, job: "competitor", tier: "", count: 0, title, reasons, feishu };
   }
 
-  // Engines worked but nothing new surfaced in any tier: an explicit grey card.
+  // Engines worked but nothing new surfaced: an explicit grey card.
   if (!groups.length) {
     const notice = `近 ${windowHours} 小时未搜到相关新闻：${COMPANIES.length} 家公司、国外同类竞品、行业报道均无新增。`;
     const noticePayload = buildCompetitorNoticePayload(title, notice, "grey");
@@ -1195,8 +1197,14 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   }
 
   const noteParts = [];
-  const tierNote = (COMPETITOR_TIER_NOTE_BUILDERS[tier] || (() => ""))(windowHours);
-  if (tierNote) noteParts.push(tierNote);
+  if (foreignGroups.length) noteParts.push("含国外同类竞品动态");
+  if (industryItems.length) {
+    noteParts.push(
+      companyGroups.length || foreignGroups.length
+        ? "部分条目为 AI 按摩机器人行业动态补充"
+        : `近 ${windowHours} 小时公司层面暂无新消息，本条为 AI 按摩机器人行业报道`
+    );
+  }
   if (llmInfo && !llmInfo.used) noteParts.push(`LLM 过滤不可用（${llmInfo.reason}），本条按关键词过滤`);
   if (reasons.length) noteParts.push(reasons.join("；"));
   const note = noteParts.join("；");
@@ -1664,10 +1672,14 @@ function keywordFallbackCompetitorItems(items, companies) {
 }
 
 function selectCompetitorGroups(companies, items, limit) {
+  // 直链优先排序：Google 跳转链接只作兜底，同一公司内排在直链后面。
+  const linkQuality = (item) => (isGoogleNewsRedirect(item.url) ? 0 : 1);
   const groups = [];
   let total = 0;
   for (const company of companies) {
-    const companyItems = dedupeCompetitorItems(items.filter((item) => item.company === company.name));
+    const companyItems = dedupeCompetitorItems(
+      items.filter((item) => item.company === company.name)
+    ).sort((a, b) => linkQuality(b) - linkQuality(a) || b.dateMs - a.dateMs);
     if (!companyItems.length) continue;
     const room = Math.min(COMPETITOR_PER_COMPANY_CAP, limit - total);
     if (room <= 0) break;
@@ -1680,13 +1692,26 @@ function selectCompetitorGroups(companies, items, limit) {
 
 // Cross-engine and cross-run dedupe: exact key, plus a stricter-than-digest
 // title similarity, so the same story from Google and Bing collapses into one.
+// 同一则新闻两个引擎都收录时，保留 Bing 的直连原文链接——Google News 的
+// 跳转链接在国内打不开（飞书内置浏览器访问不了 news.google.com）。
 function dedupeCompetitorItems(items) {
   const out = [];
   for (const item of items) {
-    const duplicate = out.some((old) => itemKey(old) === itemKey(item) || competitorSameStory(old, item));
-    if (!duplicate) out.push(item);
+    const existingIndex = out.findIndex((old) => itemKey(old) === itemKey(item) || competitorSameStory(old, item));
+    if (existingIndex === -1) {
+      out.push(item);
+      continue;
+    }
+    const existing = out[existingIndex];
+    if (isGoogleNewsRedirect(existing.url) && !isGoogleNewsRedirect(item.url)) {
+      out[existingIndex] = { ...existing, url: item.url, sourceName: existing.sourceName || item.sourceName };
+    }
   }
   return out;
+}
+
+function isGoogleNewsRedirect(url) {
+  return /news\.google\.com\/(rss\/)?(articles|link)\//.test(String(url || ""));
 }
 
 function competitorSameStory(a, b) {

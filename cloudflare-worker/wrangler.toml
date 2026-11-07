@@ -13,7 +13,7 @@ crons = ["20 1 * * *", "30 0 * * *"]
 [vars]
 AIHOT_USER_AGENT = "ai-feishu-digest-worker/0.1 (+https://github.com/xiaobeike/ai_feishu_digest)"
 DIGEST_LIMIT = "10"
-COMPETITOR_LIMIT = "10"
+COMPETITOR_LIMIT = "5"
 COMPETITOR_WINDOW_HOURS = "24"
 ZHIPU_MODEL = "glm-4.7-flash"
 

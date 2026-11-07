@@ -376,13 +376,13 @@ const lichiNoiseItem = () => rssItem({
     if (url.includes("news.google.com")) {
       const q = new URL(url).searchParams.get("q") || "";
       const items = [];
-      if (q.includes("德壹")) items.push(deyeeItem("https://example.com/deyee-1"));
+      if (q.includes("德壹")) items.push(deyeeItem("https://news.google.com/rss/articles/CBMiStubDeYee?oc=5"));
       if (q.includes("力驰")) items.push(lichiNoiseItem());
       return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
     }
     if (url.includes("bing.com")) {
       const q = new URL(url).searchParams.get("q") || "";
-      // 同一故事、不同 URL：跨引擎去重必须合成一条。
+      // 同一故事、不同 URL：跨引擎去重必须合成一条，且保留 Bing 的直连链接。
       const items = q.includes("德壹") ? [deyeeItem("https://example.com/deyee-1-bing")] : [];
       return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
     }
@@ -398,7 +398,7 @@ const lichiNoiseItem = () => rssItem({
     check("competitor: grouped under 德壹", body.groups[0] && body.groups[0].company === "德壹", JSON.stringify(body.groups));
     check("competitor: indigo card", body.feishu.payload.card.header.template === "indigo");
     const lines = cardLines(body.feishu.payload);
-    check("competitor: card carries article link", lines.some((line) => line.includes("](https://example.com/deyee-1)")), JSON.stringify(lines));
+    check("competitor: card carries article link", lines.some((line) => line.includes("](https://example.com/deyee-1-bing)")), JSON.stringify(lines));
     check("competitor: card carries source media", lines.some((line) => line.includes("网易新闻")));
     check("competitor: card carries LLM summary", lines.some((line) => line.includes("新闻摘要")));
     check("competitor: new-player clue shown in company tier", lines.some((line) => line.includes("新玩家线索：某新玩家机器人")));
@@ -606,11 +606,43 @@ const lichiNoiseItem = () => rssItem({
   };
   try {
     const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", DEEPSEEK_API_KEY: "test-ds-key" }, "?job=competitor&dry=1");
-    check("deepseek rescue: budget caps the calls", deepseekCalls === 10, `calls=${deepseekCalls}`);
-    // 灵手/力驰/德壹各有多条查询但救援词相同，补搜结果去重后 11 家剩 7 家有条目。
-    check("deepseek rescue: items land in companies tier", body.tier === "companies" && body.count === 7, `tier=${body.tier} count=${body.count}`);
-    check("deepseek rescue: grouped by company", body.groups.some((group) => group.company === "德壹" && group.titles.length === 1), JSON.stringify(body.groups).slice(0, 120));
+    check("deepseek rescue: budget covers all 11 companies", deepseekCalls === 11, `calls=${deepseekCalls}`);
+    // 凑满 COMPETITOR_LIMIT=5 即停（公司档优先，不再行业补位）。
+    check("deepseek rescue: items land in companies tier", body.tier === "companies" && body.count === 5 && body.groups.length === 5, `tier=${body.tier} count=${body.count} groups=${body.groups.length}`);
+    check("deepseek rescue: grouped by company", body.groups[0] && body.groups[0].company === "钧控" && body.groups.every((group) => group.titles.length === 1), JSON.stringify(body.groups).slice(0, 120));
     check("deepseek rescue: source media shown", cardLines(body.feishu.payload).some((line) => line.includes("36氪")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 19. 只有 Google 跳转链接的新闻不丢弃（放原链接兜底），行业新闻补位凑满。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    if (url.includes("api.deepseek.com")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return searchStub({
+      google: {
+        德壹: [deyeeItem("https://news.google.com/rss/articles/CBMiOnlyGoogle?oc=5")],
+        按摩机器人: [rssItem({
+          title: "按摩机器人标准发布",
+          media: "新华网",
+          url: "https://example.com/industry-direct",
+          snippet: "行业标准正式发布。",
+          ageHours: 4
+        })]
+      }
+    })(input);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", DEEPSEEK_API_KEY: "test-ds-key" }, "?job=competitor&dry=1");
+    check("domestic-only: redirect kept as fallback + industry fills", body.tier === "companies" && body.count === 2, `tier=${body.tier} count=${body.count}`);
+    check("domestic-only: google fallback link allowed", JSON.stringify(body.feishu.payload).includes("news.google.com"));
+    check("domestic-only: industry filler present", body.groups.some((group) => group.company === "AI 按摩机器人行业"), JSON.stringify(body.groups));
   } finally {
     globalThis.fetch = realFetch;
   }
