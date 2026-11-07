@@ -329,11 +329,14 @@ function llmStubResponse(input, init) {
   );
 }
 
-// 搜索桩：按 q 参数里的片段返回条目；未命中返回空 RSS；engine 可以为同一故事
-// 返回不同 URL（模拟 Google/Bing 各自收录）。
+// 搜索桩：按 q 参数里的片段返回条目；未命中返回空 RSS；allorigins 代理请求
+// 会解出内层 URL 再匹配（模拟代理转发）；engine 可以为同一故事返回不同 URL。
 function searchStub({ google = {}, bing = {} } = {}) {
   return async (input) => {
-    const url = requestUrl(input);
+    let url = requestUrl(input);
+    if (url.includes("allorigins")) {
+      url = new URL(url).searchParams.get("url") || "";
+    }
     if (!url.includes("news.google.com") && !url.includes("bing.com")) {
       throw new Error(`competitor test got unexpected request: ${url}`);
     }
@@ -499,12 +502,12 @@ const lichiNoiseItem = () => rssItem({
   }
 }
 
-// 16. 搜索源全挂：橙色告警卡片，ok=false。
+// 16. 搜索源全挂（直连和代理都 503）：橙色告警卡片，ok=false。
 {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = requestUrl(input);
-    if (url.includes("news.google.com") || url.includes("bing.com")) {
+    if (url.includes("news.google.com") || url.includes("bing.com") || url.includes("allorigins")) {
       return new Response("down", { status: 503 });
     }
     throw new Error(`competitor test got unexpected request: ${url}`);
@@ -514,6 +517,36 @@ const lichiNoiseItem = () => rssItem({
     check("engines down: reports failure", status === 200 && body.ok === false, `ok=${body.ok}`);
     check("engines down: orange notice card", body.feishu.payload.card.header.template === "orange");
     check("engines down: notice explains itself", cardLines(body.feishu.payload).some((line) => line.includes("搜索源暂时全部不可用")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// 17. 直连被 Google 503 封锁：抖动重试后熔断，走 allorigins 代理救回条目。
+{
+  const realFetch = globalThis.fetch;
+  let googleDirectCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    if (url.includes("allorigins")) {
+      const inner = new URL(url).searchParams.get("url") || "";
+      const q = new URL(inner).searchParams.get("q") || "";
+      const items = q.includes("德壹") ? [deyeeItem("https://example.com/deyee-proxy")] : [];
+      return new Response(rssChannel(items), { status: 200, headers: { "content-type": "application/xml" } });
+    }
+    if (url.includes("news.google.com")) {
+      googleDirectCalls += 1;
+      return new Response("blocked", { status: 503 });
+    }
+    if (url.includes("bing.com")) return new Response(rssChannel([]), { status: 200, headers: { "content-type": "application/xml" } });
+    return realFetch(input, init);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key" }, "?job=competitor&dry=1");
+    check("proxy fallback: rescued via allorigins", body.tier === "companies" && body.count === 1, `tier=${body.tier} count=${body.count}`);
+    check("proxy fallback: grouped under 德壹", body.groups[0] && body.groups[0].company === "德壹", JSON.stringify(body.groups));
+    check("proxy fallback: direct was tried before breaker", googleDirectCalls >= 2, `googleDirectCalls=${googleDirectCalls}`);
   } finally {
     globalThis.fetch = realFetch;
   }

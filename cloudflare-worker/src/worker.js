@@ -32,6 +32,11 @@ const COMPETITOR_LLM_CANDIDATE_CAP = 40;
 // Workers 每个请求最多 6 条同时出站连接，超出的会排队并被超时器误杀；
 // 每个查询内部 google+bing 并行占 2 条，所以并发池设 3，最多 6 条。
 const COMPETITOR_QUERY_CONCURRENCY = 3;
+// 搜索引擎用浏览器 UA（自报家门的 bot UA 更容易被 Google 503）；连续失败达到
+// 阈值就熔断直连、走 allorigins 公共代理（代理用它自己的出口 IP，绕开封锁）。
+const NEWS_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const NEWS_PROXY_PREFIX = "https://api.allorigins.win/raw?url=";
+const ENGINE_BREAKER_THRESHOLD = 3;
 const COMPETITOR_PER_COMPANY_CAP = 3;
 const COMPETITOR_SEEN_TTL_DAYS = 30;
 const COMPETITOR_SEEN_KEY = "competitor:seen";
@@ -1071,6 +1076,8 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   const seen = await loadSeenMarks(env);
   const reasons = [];
   const sampleErrors = [];
+  // 引擎熔断状态：本运行内直连连续失败的次数，跨查询共享。
+  const breaker = { google: 0, bing: 0 };
   let enginesOk = false;
   let llmInfo = null;
 
@@ -1083,7 +1090,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   let tier = "";
 
   for (const candidate of tiers) {
-    const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale);
+    const collected = await collectCompanyCandidates(env, candidate.companies, cutoff, candidate.locale, breaker);
     if (collected.reachable) enginesOk = true;
     if (collected.errors.length) {
       reasons.push(`${candidate.key} 搜索 ${collected.errors.length} 个请求失败`);
@@ -1106,7 +1113,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   }
 
   if (!groups.length) {
-    const collected = await collectIndustryCandidates(env, cutoff);
+    const collected = await collectIndustryCandidates(env, cutoff, breaker);
     if (collected.reachable) enginesOk = true;
     if (collected.errors.length) {
       reasons.push(`行业档搜索 ${collected.errors.length} 个请求失败`);
@@ -1224,12 +1231,12 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   return { ...summary, feishu: feishuResult };
 }
 
-async function collectCompanyCandidates(env, companies, cutoff, locale) {
+async function collectCompanyCandidates(env, companies, cutoff, locale, breaker) {
   const tasks = companies.flatMap((company) =>
     company.queries.map((query) => ({ company: company.name, query }))
   );
   const settled = await mapWithConcurrency(tasks, COMPETITOR_QUERY_CONCURRENCY, async (task) => {
-    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale);
+    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale, breaker);
     return items.map((item) => ({ ...item, company: task.company }));
   });
 
@@ -1267,9 +1274,9 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-async function collectIndustryCandidates(env, cutoff) {
+async function collectIndustryCandidates(env, cutoff, breaker) {
   const settled = await mapWithConcurrency(INDUSTRY_QUERIES, COMPETITOR_QUERY_CONCURRENCY, (query) =>
-    fetchCompetitorQueryResults(env, query, cutoff, "zh")
+    fetchCompetitorQueryResults(env, query, cutoff, "zh", breaker)
   );
 
   const items = [];
@@ -1291,13 +1298,13 @@ async function collectIndustryCandidates(env, cutoff) {
 }
 
 // One query hits both engines; as long as one returns items the query succeeds.
-async function fetchCompetitorQueryResults(env, query, cutoff, locale) {
+async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker) {
   const engines = [
     ["google", googleNewsUrl(query, locale)],
     ["bing", bingNewsUrl(query)]
   ];
   const settled = await Promise.allSettled(
-    engines.map(([name, url]) => fetchCompetitorFeed(env, name, url, cutoff))
+    engines.map(([name, url]) => fetchCompetitorFeed(env, name, url, cutoff, breaker))
   );
 
   const items = [];
@@ -1310,11 +1317,48 @@ async function fetchCompetitorQueryResults(env, query, cutoff, locale) {
   return items;
 }
 
-async function fetchCompetitorFeed(env, engineName, url, cutoff) {
+// 单引擎抓取：直连 → 失败抖动重试 → 连续失败熔断后走公共代理。
+// breaker 记录每个引擎的连续失败次数，只在本次运行内有效。
+async function fetchCompetitorFeed(env, engineName, url, cutoff, breaker) {
+  const attempts = [];
+  if (breaker[engineName] < ENGINE_BREAKER_THRESHOLD) {
+    attempts.push({ label: engineName, url });
+  }
+  attempts.push({ label: `${engineName}-proxy`, url: NEWS_PROXY_PREFIX + encodeURIComponent(url.href) });
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      const items = await fetchCompetitorFeedDirect(env, attempt.label, attempt.url, cutoff);
+      if (attempt.label === engineName) breaker[engineName] = 0;
+      return items;
+    } catch (error) {
+      lastError = error;
+      if (attempt.label !== engineName) break;
+      breaker[engineName] += 1;
+      // 直连刚失败先原地重试一次（带抖动），很多 429/503 是瞬时限流。
+      if (breaker[engineName] <= ENGINE_BREAKER_THRESHOLD) {
+        await sleep(500 + Math.floor(Math.random() * 500));
+        try {
+          const items = await fetchCompetitorFeedDirect(env, engineName, url, cutoff);
+          breaker[engineName] = 0;
+          return items;
+        } catch (retryError) {
+          lastError = retryError;
+          breaker[engineName] += 1;
+        }
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function fetchCompetitorFeedDirect(env, engineName, url, cutoff) {
   const response = await fetchWithTimeout(url, {
     headers: {
       "accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
-      "user-agent": env.AIHOT_USER_AGENT || "ai-feishu-digest-worker/0.1"
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "user-agent": NEWS_BROWSER_UA
     }
   }, COMPETITOR_TIMEOUT_MS);
   if (!response.ok) throw new Error(`${engineName} news search failed: HTTP ${response.status}`);
