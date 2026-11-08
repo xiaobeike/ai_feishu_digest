@@ -2,6 +2,10 @@ name = "ai-feishu-digest-worker"
 main = "src/worker.js"
 compatibility_date = "2026-07-15"
 
+# 打开 Workers Logs：定时任务抛异常时可以在控制台查到完整堆栈。
+[observability]
+enabled = true
+
 [triggers]
 # 两条定时流水线并存：
 # - 01:20 UTC = 北京 09:20，AIHOT 智能前沿日报（原样未动）。AI HOT 名义上 08:00
