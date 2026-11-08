@@ -1117,7 +1117,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
 
   // —— 第一优先：11 家公司，有多少推多少（上限 limit=10，直链优先，跳转链接兜底）——
   const companyFresh = (await collectOneTier(COMPANIES, "zh", "公司档"))
-    .filter((item) => !isFinanceDataUrl(item.url));
+    .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title));
   let companyGroups = [];
   let companyLlm = null;
   if (companyFresh.length) {
@@ -1525,7 +1525,12 @@ function unwrapBingLink(link) {
 // Cheap, deterministic, and it caps how much has to go through the LLM.
 // 证券行情/个股数据页不是新闻（Bing 会把行情页混进公司搜索结果）。
 function isFinanceDataUrl(url) {
-  return /data\.eastmoney\.com|finance\.baidu\.com\/stock|sse\.com\.cn|szse\.cn|stockstar\.com|xueqiu\.com|10jqka\.com|quote\.|\/stock\/|stockcalendar/i.test(String(url || ""));
+  return /data\.eastmoney\.com|emweb\.securities\.eastmoney\.com|PC_HSF10|\/F10\/|finance\.baidu\.com\/stock|sse\.com\.cn|szse\.cn|stockstar\.com|xueqiu\.com|10jqka\.com|quote\.|\/stock\/|stockcalendar/i.test(String(url || ""));
+}
+
+// 标题特征兜底：分红/除权/个股日历这类词基本只出现在证券数据页标题里。
+function isFinanceDataTitle(title) {
+  return /(分红方案|分红融资|除权除息|派息日|股权登记日|个股日历|资金流向|龙虎榜|股东户数)/.test(String(title || ""));
 }
 
 function matchesAnyAlias(item, companies) {
@@ -1644,7 +1649,7 @@ function buildCompetitorLlmPrompt(items, companies) {
     ? companies.map((company, index) => `${index + 1}. ${company.name} —— ${company.desc}`).join("\n")
     : "AI 按摩/理疗机器人行业（按摩机器人、理疗机器人、艾灸机器人、推拿机器人、具身智能康养等）";
   const rule = companies.length
-    ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）；股票行情页、个股日历、公司官网主页等非新闻页面一律判为不相关。"
+    ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）；股票行情页、个股日历、分红除权、公司官网主页等非新闻页面一律判为不相关。"
     : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目。";
   const clueRule = "同时提取条目中出现的公司/品牌名（companies 数组，尤其是做 AI 按摩理疗机器人的新玩家，最多 3 个，可为空数组）。";
   const candidates = items.map((item, index) => ({
