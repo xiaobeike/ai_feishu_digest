@@ -1157,6 +1157,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
       // 与已选公司/国外条目去重，直链优先，Google 跳转链接兜底。
       const linkQuality = (item) => (isGoogleNewsRedirect(item.url) ? 0 : 1);
       industryItems = filtered.kept
+        .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title))
         .filter((item) => !pushedSoFar.some((old) => itemKey(old) === itemKey(item) || competitorSameStory(old, item)))
         .sort((a, b) => linkQuality(b) - linkQuality(a) || b.dateMs - a.dateMs)
         .slice(0, room)
@@ -1528,9 +1529,12 @@ function isFinanceDataUrl(url) {
   return /data\.eastmoney\.com|emweb\.securities\.eastmoney\.com|PC_HSF10|\/F10\/|finance\.baidu\.com\/stock|sse\.com\.cn|szse\.cn|stockstar\.com|xueqiu\.com|10jqka\.com|quote\.|\/stock\/|stockcalendar/i.test(String(url || ""));
 }
 
-// 标题特征兜底：分红/除权/个股日历这类词基本只出现在证券数据页标题里。
+// 标题特征兜底：分红/除权/个股日历这类词基本只出现在证券数据页标题里；
+// 标题里嵌着股票代码（如“奥佳华(sz002614)”）的条目，链接也是行情页而非文章。
 function isFinanceDataTitle(title) {
-  return /(分红方案|分红融资|除权除息|派息日|股权登记日|个股日历|资金流向|龙虎榜|股东户数)/.test(String(title || ""));
+  const t = String(title || "");
+  return /(分红方案|分红融资|除权除息|派息日|股权登记日|个股日历|资金流向|龙虎榜|股东户数|财报|季报|中报|年报|问询函|停牌|复牌|减持|质押|招股)/.test(t)
+    || /[（(](sz|sh|bj)?\d{6}[)）]/i.test(t);
 }
 
 function matchesAnyAlias(item, companies) {
@@ -1649,12 +1653,13 @@ function buildCompetitorLlmPrompt(items, companies) {
     ? companies.map((company, index) => `${index + 1}. ${company.name} —— ${company.desc}`).join("\n")
     : "AI 按摩/理疗机器人行业（按摩机器人、理疗机器人、艾灸机器人、推拿机器人、具身智能康养等）";
   const rule = companies.length
-    ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）；股票行情页、个股日历、分红除权、公司官网主页等非新闻页面一律判为不相关。"
+    ? "判断每条新闻是否真实与上述某个主体相关，剔除仅同名或同词的无关新闻（其他行业、地名、人名等）；股票行情页、个股日历、分红除权、公司官网主页等非新闻页面一律判为不相关；标题或链接里带股票代码（如 sz002614）、指向行情/数据页而非文章页的，也判为不相关。"
     : "判断每条新闻是否与该行业相关（新品、技术、融资、展会、政策、门店、评论均可），剔除明显无关的条目。";
   const clueRule = "同时提取条目中出现的公司/品牌名（companies 数组，尤其是做 AI 按摩理疗机器人的新玩家，最多 3 个，可为空数组）。";
   const candidates = items.map((item, index) => ({
     i: index + 1,
     title: item.title,
+    url: shorten(item.url, 100),
     source: item.sourceName,
     published: item.dateLabel,
     snippet: shorten(item.summary, 120)

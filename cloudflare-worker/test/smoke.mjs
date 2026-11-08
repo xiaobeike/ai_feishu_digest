@@ -648,6 +648,26 @@ const lichiNoiseItem = () => rssItem({
   }
 }
 
+// 20. 标题内嵌股票代码（行情页条目）和财报季报类条目必须在预过滤阶段剔除。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    return searchStub({ google: { 荣泰: [
+      rssItem({ title: "荣泰健康(sh603579)", media: "财联社", url: "https://www.cls.cn/stock?code=sh603579", snippet: "行情数据。", ageHours: 2 }),
+      rssItem({ title: "荣泰健康进博会展示拉伸按摩机器人", media: "热点科技", url: "https://example.com/rotai-expo", snippet: "荣泰健康在进博会现场展示拉伸按摩机器人。", ageHours: 3 })
+    ] } })(input);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", DEEPSEEK_API_KEY: "test-ds-key" }, "?job=competitor&dry=1");
+    check("stock-code: quote-page entry dropped", body.tier === "companies" && body.count === 1, `tier=${body.tier} count=${body.count}`);
+    check("stock-code: no cls stock link in card", !JSON.stringify(body.feishu.payload).includes("cls.cn"), JSON.stringify(body.feishu.payload).slice(0, 150));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 const failed = results.filter((result) => !result.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length) {
