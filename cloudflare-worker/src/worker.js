@@ -36,6 +36,7 @@ const COMPETITOR_QUERY_CONCURRENCY = 3;
 // 阈值就熔断直连、走 allorigins 公共代理（代理用它自己的出口 IP，绕开封锁）。
 const NEWS_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const NEWS_PROXY_PREFIX = "https://api.allorigins.win/raw?url=";
+const NEWS_PROXY2_PREFIX = "https://api.codetabs.com/v1/proxy?quest=";
 const ENGINE_BREAKER_THRESHOLD = 3;
 // DeepSeek Search 作为救援引擎：RSS 双引擎（含代理）失败或零结果时补搜一次。
 // 0.005 元/次、无结果不计费；单次运行最多发 RESCUE_BUDGET 次，控制子请求与费用。
@@ -303,7 +304,21 @@ export default {
       return;
     }
     ctx.waitUntil(
-      runDigest(env, { trigger: "scheduled", cron: event.cron }, { dryRun })
+      runDigest(env, { trigger: "scheduled", cron: event.cron }, { dryRun }).catch(async (error) => {
+        // 日报路径同样绝不静默：崩了就发橙色错误卡。
+        console.error(`digest crashed: ${error instanceof Error && error.stack ? error.stack : errorMessage(error)}`);
+        if (dryRun) return;
+        try {
+          const payload = buildFeishuNoticePayload(
+            `智能前沿日报异常（${todayInBeijing()}）`,
+            `流水线执行中断：${shorten(errorMessage(error), 150)}。可手动排查：/run?dry=1`,
+            "orange"
+          );
+          if (env.FEISHU_WEBHOOK_URL) await sendFeishu(env, payload);
+        } catch (noticeError) {
+          console.error(`digest crash notice failed: ${errorMessage(noticeError)}`);
+        }
+      })
     );
   },
 
@@ -1423,7 +1438,9 @@ async function fetchCompetitorFeed(env, engineName, url, cutoff, breaker) {
   if (breaker[engineName] < ENGINE_BREAKER_THRESHOLD) {
     attempts.push({ label: engineName, url });
   }
+  // 公共代理也可能是单点（allorigins 实测 520 过），备两家轮流兜底。
   attempts.push({ label: `${engineName}-proxy`, url: NEWS_PROXY_PREFIX + encodeURIComponent(url.href) });
+  attempts.push({ label: `${engineName}-proxy2`, url: NEWS_PROXY2_PREFIX + encodeURIComponent(url.href) });
 
   let lastError = null;
   for (const attempt of attempts) {
@@ -1463,7 +1480,10 @@ async function fetchCompetitorFeedDirect(env, engineName, url, cutoff) {
   if (!response.ok) throw new Error(`${engineName} news search failed: HTTP ${response.status}`);
 
   const xml = await response.text();
-  return parseFeedXml(xml, engineName)
+  // 大 Feed 动辄上百条，逐条正则解析会吃掉 Worker 的 CPU 配额
+  // （2026-11-08 08:30 的 scriptThrewException 疑似与此有关）；
+  // 引擎已按相关度排序，只解析前 30 条足够凑卡。
+  return parseFeedXml(xml, engineName).slice(0, 30)
     .filter((item) => item.title && item.url)
     // Google/Bing always carry a pubDate; an undated item is kept rather than
     // silently dropped, at the cost of possibly being a little older.
@@ -1526,7 +1546,11 @@ function unwrapBingLink(link) {
 // Cheap, deterministic, and it caps how much has to go through the LLM.
 // 证券行情/个股数据页不是新闻（Bing 会把行情页混进公司搜索结果）。
 function isFinanceDataUrl(url) {
-  return /data\.eastmoney\.com|emweb\.securities\.eastmoney\.com|PC_HSF10|\/F10\/|finance\.baidu\.com\/stock|sse\.com\.cn|szse\.cn|stockstar\.com|xueqiu\.com|10jqka\.com|quote\.|\/stock\/|stockcalendar/i.test(String(url || ""));
+  const u = String(url || "");
+  // URL 里带股票代码（cls.cn/stock?code=sh603579 这类行情页）也是行情页特征。
+  const hasStockCode = /(?:[?&=/])(?:sz|sh|bj)?[036]\d{5}(?!\d)/i.test(u);
+  return hasStockCode
+    || /data\.eastmoney\.com|emweb\.securities\.eastmoney\.com|PC_HSF10|\/F10\/|finance\.baidu\.com\/stock|sse\.com\.cn|szse\.cn|stockstar\.com|xueqiu\.com|10jqka\.com|quote\.|\/stock\/|stockcalendar/i.test(u);
 }
 
 // 标题特征兜底：分红/除权/个股日历这类词基本只出现在证券数据页标题里；
