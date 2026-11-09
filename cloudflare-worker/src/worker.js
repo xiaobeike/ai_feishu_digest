@@ -37,11 +37,30 @@ const COMPETITOR_QUERY_CONCURRENCY = 3;
 const NEWS_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const NEWS_PROXY_PREFIX = "https://api.allorigins.win/raw?url=";
 const NEWS_PROXY2_PREFIX = "https://api.codetabs.com/v1/proxy?quest=";
-const ENGINE_BREAKER_THRESHOLD = 3;
+const ENGINE_BREAKER_THRESHOLD = 2;
 // DeepSeek Search 作为救援引擎：RSS 双引擎（含代理）失败或零结果时补搜一次。
 // 0.005 元/次、无结果不计费；单次运行最多发 RESCUE_BUDGET 次，控制子请求与费用。
 const DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search";
-const DEEPSEEK_RESCUE_BUDGET = 12;
+const DEEPSEEK_RESCUE_BUDGET = 14;
+// Cloudflare 免费版单次调用最多 50 个子请求；搜索源全挂时若每个查询都试
+// 直连+两家代理，22 个查询会放大成 66 次请求直接爆掉 —— 连告警卡都发不出去
+// （2026-11-09 08:30 静默的真因）。这里做全局硬预算：留 8 次给 webhook 与余量。
+// 免费版 50 次子请求上限；DeepSeek 主力模式下每个查询只打 1 次
+// （不走代理、不做直连重试），14 次救援 + webhook 仍在预算内。
+const SUBREQUEST_LIMIT = 46;
+const PROXY_ATTEMPT_LIMIT = 4;
+
+function createBudget(limit) {
+  let used = 0;
+  return {
+    get used() { return used; },
+    take(count = 1) {
+      if (used + count > limit) return false;
+      used += count;
+      return true;
+    }
+  };
+}
 const COMPETITOR_PER_COMPANY_CAP = 3;
 const COMPETITOR_SEEN_TTL_DAYS = 30;
 const COMPETITOR_SEEN_KEY = "competitor:seen";
@@ -1116,12 +1135,17 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   const sampleErrors = [];
   // 引擎熔断状态：本运行内直连连续失败的次数，跨查询共享。
   const breaker = { google: 0, bing: 0 };
+  const budget = createBudget(SUBREQUEST_LIMIT);
+  const proxy = { remaining: PROXY_ATTEMPT_LIMIT };
   const rescue = { remaining: DEEPSEEK_RESCUE_BUDGET };
   let enginesOk = false;
+  let engineFailures = 0;
 
   const collectOneTier = async (companies, locale, label) => {
-    const collected = await collectCompanyCandidates(env, companies, cutoff, locale, breaker, rescue);
-    if (collected.reachable) enginesOk = true;
+    const collected = await collectCompanyCandidates(env, companies, cutoff, locale, breaker, rescue, budget, proxy);
+    // 只有真正拿到过 RSS 才算引擎可用；全部请求 rejected 时不能报"无新闻"。
+    if (collected.succeeded > 0) enginesOk = true;
+    if (collected.succeeded === 0 && collected.errors.length) engineFailures += collected.errors.length;
     if (collected.errors.length) {
       reasons.push(`${label}搜索 ${collected.errors.length} 个请求失败`);
       if (sampleErrors.length < 3) sampleErrors.push(collected.errors[0]);
@@ -1159,8 +1183,9 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   let industryLlm = null;
   const room = COMPETITOR_FILL_TARGET - pushedSoFar.length;
   if (room > 0) {
-    const industryCollected = await collectIndustryCandidates(env, cutoff, breaker, rescue);
-    if (industryCollected.reachable) enginesOk = true;
+    const industryCollected = await collectIndustryCandidates(env, cutoff, breaker, rescue, budget, proxy);
+    if (industryCollected.succeeded > 0) enginesOk = true;
+    if (industryCollected.succeeded === 0 && industryCollected.errors.length) engineFailures += industryCollected.errors.length;
     if (industryCollected.errors.length) {
       reasons.push(`行业档搜索 ${industryCollected.errors.length} 个请求失败`);
       if (sampleErrors.length < 3) sampleErrors.push(industryCollected.errors[0]);
@@ -1190,7 +1215,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   // Every search engine failed. Say so rather than going silent, so a missing
   // report is never mistaken for "there was no news today".
   if (!groups.length && !enginesOk) {
-    const notice = `竞品搜索源暂时全部不可用（统计窗口：近 ${windowHours} 小时）。${reasons.length ? reasons.join("；") : ""}`;
+    const notice = `竞品搜索源暂时全部不可用（统计窗口：近 ${windowHours} 小时，失败 ${engineFailures} 次）。${reasons.length ? reasons.join("；") : ""}`;
     console.error(`competitor digest unavailable: ${reasons.join("; ")}`);
     if (sampleErrors.length) console.error(`competitor sample errors: ${sampleErrors.slice(0, 3).join(" | ")}`);
     const noticePayload = buildCompetitorNoticePayload(title, notice, "orange");
@@ -1289,12 +1314,18 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
   return { ...summary, feishu: feishuResult };
 }
 
-async function collectCompanyCandidates(env, companies, cutoff, locale, breaker, rescue) {
+async function collectCompanyCandidates(env, companies, cutoff, locale, breaker, rescue, budget, proxy) {
   const tasks = companies.flatMap((company) =>
-    company.queries.map((query) => ({ company: company.name, query, rescueQuery: `"${company.aliases[0]}"` }))
+    company.queries.map((query) => ({
+      company: company.name,
+      query,
+      // DeepSeek 搜索对光秃秃的公司名几乎无结果（"灵手"/"德壹" 实测 0 条），
+      // 必须带行业语境才有召回。
+      rescueQuery: `"${company.aliases[0]}" 机器人 OR 按摩 OR 理疗 OR 艾灸`
+    }))
   );
   const settled = await mapWithConcurrency(tasks, COMPETITOR_QUERY_CONCURRENCY, async (task) => {
-    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale, breaker, rescue, task.rescueQuery);
+    const items = await fetchCompetitorQueryResults(env, task.query, cutoff, locale, breaker, rescue, task.rescueQuery, budget, proxy);
     return items.map((item) => ({ ...item, company: task.company }));
   });
 
@@ -1309,7 +1340,9 @@ async function collectCompanyCandidates(env, companies, cutoff, locale, breaker,
     items: dedupeCompetitorItems(items),
     errors,
     // “引擎可用”看的是有没有请求成功，而不是搜没搜到东西——零新闻不等于全挂。
-    reachable: settled.some((result) => result.status === "fulfilled")
+    // succeeded=0 且 errors>0 才是"搜索源整体不可用"，要发橙卡而非灰卡。
+    reachable: settled.some((result) => result.status === "fulfilled"),
+    succeeded: settled.filter((result) => result.status === "fulfilled").length
   };
 }
 
@@ -1332,9 +1365,9 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-async function collectIndustryCandidates(env, cutoff, breaker, rescue) {
+async function collectIndustryCandidates(env, cutoff, breaker, rescue, budget, proxy) {
   const settled = await mapWithConcurrency(INDUSTRY_QUERIES, COMPETITOR_QUERY_CONCURRENCY, (query) =>
-    fetchCompetitorQueryResults(env, query, cutoff, "zh", breaker, rescue, '"按摩机器人"')
+    fetchCompetitorQueryResults(env, query, cutoff, "zh", breaker, rescue, '"按摩机器人"', budget, proxy)
   );
 
   const items = [];
@@ -1351,20 +1384,33 @@ async function collectIndustryCandidates(env, cutoff, breaker, rescue) {
   return {
     items: dedupeCompetitorItems(prefiltered),
     errors,
-    reachable: settled.some((result) => result.status === "fulfilled")
+    reachable: settled.some((result) => result.status === "fulfilled"),
+    succeeded: settled.filter((result) => result.status === "fulfilled").length
   };
 }
 
 // One query hits both engines; as long as one returns items the query succeeds.
 // RSS 全失败或零结果时，用 DeepSeek Search 补搜一次（成功才计费），受单次运行
 // 的救援预算约束；未配置 DEEPSEEK_API_KEY 时静默跳过。
-async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker, rescue, rescueQuery) {
+async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker, rescue, rescueQuery, budget, proxy) {
+  // 单个引擎熔断就不再打它（Cloudflare 出口 IP 常被 Google/Bing 封），
+  // 两个都熔断时完全跳过 RSS，把子请求预算留给 DeepSeek。
   const engines = [
     ["google", googleNewsUrl(query, locale)],
     ["bing", bingNewsUrl(query)]
-  ];
+  ].filter(([name]) => breaker[name] < ENGINE_BREAKER_THRESHOLD);
+  // 引擎全部熔断（或根本没配）时 settled 为空：直接走 DeepSeek，不当作"成功"。
+  if (!engines.length) {
+    if (!clean(env.DEEPSEEK_API_KEY) || rescue.remaining <= 0 || !rescueQuery) {
+      throw new Error("所有 RSS 引擎已熔断且 DeepSeek 不可用");
+    }
+    if (!budget.take()) throw new Error("子请求预算耗尽");
+    rescue.remaining -= 1;
+    console.log(JSON.stringify({ rescue: "fired", query: rescueQuery, rssErrors: 0, reason: "engines-broken" }));
+    return await fetchDeepSeekSearchResults(env, rescueQuery, cutoff);
+  }
   const settled = await Promise.allSettled(
-    engines.map(([name, url]) => fetchCompetitorFeed(env, name, url, cutoff, breaker))
+    engines.map(([name, url]) => fetchCompetitorFeed(env, name, url, cutoff, breaker, budget, proxy))
   );
 
   const items = [];
@@ -1373,12 +1419,20 @@ async function fetchCompetitorQueryResults(env, query, cutoff, locale, breaker, 
     if (result.status === "fulfilled") items.push(...result.value);
     else errors.push(errorMessage(result.reason));
   }
+
+  // Cloudflare 出口 IP 已被 Google/Bing 长期封锁（2026-11-09 实测本地 200、
+  // Worker 全失败），公共代理也常挂。所以 DeepSeek 搜索升为主力：RSS 拿不到
+  // 东西时优先用它，而不是等它兜底。
   if (items.length || !rescueQuery) {
     if (!items.length && errors.length) throw new Error(errors.join("; "));
     return items;
   }
 
   if (!clean(env.DEEPSEEK_API_KEY) || rescue.remaining <= 0) {
+    if (errors.length) throw new Error(errors.join("; "));
+    return items;
+  }
+  if (!budget.take()) {
     if (errors.length) throw new Error(errors.join("; "));
     return items;
   }
@@ -1428,22 +1482,33 @@ async function fetchDeepSeekSearchResults(env, query, cutoff) {
     };
   })
     .filter((item) => item.title && item.url)
+    .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title))
     .filter((item) => !item.publishedAt || dateMs(item.publishedAt) >= cutoff);
 }
 
 // 单引擎抓取：直连 → 失败抖动重试 → 连续失败熔断后走公共代理。
 // breaker 记录每个引擎的连续失败次数，只在本次运行内有效。
-async function fetchCompetitorFeed(env, engineName, url, cutoff, breaker) {
+async function fetchCompetitorFeed(env, engineName, url, cutoff, breaker, budget, proxy) {
   const attempts = [];
   if (breaker[engineName] < ENGINE_BREAKER_THRESHOLD) {
-    attempts.push({ label: engineName, url });
+    attempts.push({ label: engineName, url, needsProxyQuota: false });
   }
-  // 公共代理也可能是单点（allorigins 实测 520 过），备两家轮流兜底。
-  attempts.push({ label: `${engineName}-proxy`, url: NEWS_PROXY_PREFIX + encodeURIComponent(url.href) });
-  attempts.push({ label: `${engineName}-proxy2`, url: NEWS_PROXY2_PREFIX + encodeURIComponent(url.href) });
+  // 公共代理是稀缺资源（两家都常挂），只在前几个查询熔断时试探一次，
+  // 确认代理也不通就别再浪费——把预算留给 DeepSeek 主力搜索。
+  // 具体：只在直连刚刚失败（breaker 达到熔断阈值）的那一次尝试代理。
+  if (proxy.remaining > 0 && breaker[engineName] === ENGINE_BREAKER_THRESHOLD) {
+    attempts.push({ label: `${engineName}-proxy`, url: NEWS_PROXY_PREFIX + encodeURIComponent(url.href), needsProxyQuota: true });
+    attempts.push({ label: `${engineName}-proxy2`, url: NEWS_PROXY2_PREFIX + encodeURIComponent(url.href), needsProxyQuota: true });
+  }
 
   let lastError = null;
   for (const attempt of attempts) {
+    // 预算或代理配额不足就跳过这次尝试，绝不把子请求烧到上限。
+    if (!budget.take()) break;
+    if (attempt.needsProxyQuota) {
+      if (proxy.remaining <= 0) continue;
+      proxy.remaining -= 1;
+    }
     try {
       const items = await fetchCompetitorFeedDirect(env, attempt.label, attempt.url, cutoff);
       if (attempt.label === engineName) breaker[engineName] = 0;
@@ -1453,17 +1518,8 @@ async function fetchCompetitorFeed(env, engineName, url, cutoff, breaker) {
       if (attempt.label !== engineName) break;
       breaker[engineName] += 1;
       // 直连刚失败先原地重试一次（带抖动），很多 429/503 是瞬时限流。
-      if (breaker[engineName] <= ENGINE_BREAKER_THRESHOLD) {
-        await sleep(500 + Math.floor(Math.random() * 500));
-        try {
-          const items = await fetchCompetitorFeedDirect(env, engineName, url, cutoff);
-          breaker[engineName] = 0;
-          return items;
-        } catch (retryError) {
-          lastError = retryError;
-          breaker[engineName] += 1;
-        }
-      }
+      // 不再原地重试：每个查询每引擎只打一次，失败即计熔断并交给
+      // 代理/DeepSeek。原地重试是子请求膨胀的主因（2026-11-09 事故）。
     }
   }
   throw lastError;
