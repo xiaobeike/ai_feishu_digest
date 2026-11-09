@@ -78,68 +78,81 @@ const COMPANIES = [
     name: "钧控",
     desc: "上海钧控机器人/浙江钧控智能科技，AI 中医理疗按摩机器人",
     aliases: ["钧控", "junctrl"],
+    // 借鉴 AIHOT 的 IDENTITY_LEXICON：正文必须命中才算这家公司的事，
+    // 挡住同名公司与行情页噪音。
+    identity: [/钧控/, /junctrl/i],
     queries: ['"钧控"']
   },
   {
     name: "灵手",
     desc: "深圳市灵手科技，3D 视觉理疗按摩机器人",
     aliases: ["灵手", "lscure"],
-    queries: ['"灵手" ("机器人" OR "理疗" OR "按摩" OR "艾灸" OR "科技")']
+        identity: [/灵手/, /lscure/i],
+queries: ['"灵手" ("机器人" OR "理疗" OR "按摩" OR "艾灸" OR "科技")']
   },
   {
     name: "大医匠",
     desc: "深圳市大医匠科技，艾灸理疗机器人",
     aliases: ["大医匠"],
-    queries: ['"大医匠"']
+        identity: [/大医匠/],
+queries: ['"大医匠"']
   },
   {
     name: "暖小贝",
     desc: "暖小贝（武汉海象智康/海沁医疗），共享按摩理疗机器人门店",
     aliases: ["暖小贝", "海沁医疗"],
-    queries: ['"暖小贝" OR "海沁医疗"']
+        identity: [/暖小贝/, /海沁医疗/],
+queries: ['"暖小贝" OR "海沁医疗"']
   },
   {
     name: "力驰",
     desc: "深圳力驰传感技术，按摩理疗机器人与六维力传感器",
     aliases: ["力驰", "力驰传感"],
-    queries: ['"力驰" ("机器人" OR "理疗" OR "按摩" OR "推拿" OR "传感")']
+        identity: [/力驰/],
+queries: ['"力驰" ("机器人" OR "理疗" OR "按摩" OR "推拿" OR "传感")']
   },
   {
     name: "具身风暴",
     desc: "广东具身风暴机器人，具身智能按摩理疗机器人",
     aliases: ["具身风暴", "俏妃AI云智护", "robotstorm"],
-    queries: ['"具身风暴" OR "俏妃AI云智护"']
+        identity: [/具身风暴/, /俏妃/],
+queries: ['"具身风暴" OR "俏妃AI云智护"']
   },
   {
     name: "德壹",
     desc: "深圳市德壹医疗科技，具身智能按摩理疗机器人",
     aliases: ["德壹", "deyeemed"],
-    queries: ['"德壹" ("机器人" OR "按摩" OR "理疗" OR "艾灸" OR "医疗")']
+        identity: [/德壹/, /deyeemed/i],
+queries: ['"德壹" ("机器人" OR "按摩" OR "理疗" OR "艾灸" OR "医疗")']
   },
   // ↓ 2026-11-07 市面调研补充的文档外玩家（公开报道核实）
   {
     name: "易启未来",
     desc: "杭州易启未来智能科技（网易伏羲孵化），R1 智能按摩机器人，自营门店「易轻松」",
     aliases: ["易启未来", "易轻松"],
-    queries: ['"易启未来" OR "易轻松"']
+        identity: [/易启未来/, /易轻松/],
+queries: ['"易启未来" OR "易轻松"']
   },
   {
     name: "如身机器人",
     desc: "上海如身机器人，「修身」多合一理疗按摩机器人（无烟艾灸+电磁热疗），康养机构投放",
     aliases: ["如身机器人", "如身科技"],
-    queries: ['"如身机器人" OR "如身科技"']
+        identity: [/如身机器人/, /如身科技/],
+queries: ['"如身机器人" OR "如身科技"']
   },
   {
     name: "荣泰健康",
     desc: "荣泰健康（按摩椅龙头），RT9000 AI 按摩机器人与具身智能动向；纯财报股价类不算",
     aliases: ["荣泰健康", "RT9000"],
-    queries: ['"荣泰健康" ("按摩机器人" OR "理疗" OR "具身智能" OR "RT9000")']
+        identity: [/荣泰/, /RT9000/i],
+queries: ['"荣泰健康" ("按摩机器人" OR "理疗" OR "具身智能" OR "RT9000")']
   },
   {
     name: "奥佳华",
     desc: "奥佳华 OGAWA（按摩椅龙头），OG9598/OG8598X AI 按摩机器人产品线；纯财报股价类不算",
     aliases: ["奥佳华", "OG9598", "OG8598"],
-    queries: ['"奥佳华" ("按摩机器人" OR "AI按摩" OR "OG9598" OR "OG8598")']
+        identity: [/奥佳华/, /OGAWA/i],
+queries: ['"奥佳华" ("按摩机器人" OR "AI按摩" OR "OG9598" OR "OG8598")']
   }
 ];
 
@@ -150,31 +163,36 @@ const FOREIGN_COMPANIES = [
     name: "Aescape",
     desc: "美国纽约，AI 按摩机器人桌，已进驻 Massage Envy/Equinox",
     aliases: ["aescape"],
-    queries: ['Aescape ("massage" OR "robot" OR "robotic")']
+        identity: [/aescape/i],
+queries: ['Aescape ("massage" OR "robot" OR "robotic")']
   },
   {
     name: "AiTreat",
     desc: "新加坡，EMMA 中医推拿机器人",
     aliases: ["aitreat"],
-    queries: ['AiTreat ("massage" OR "robot" OR "EMMA")']
+        identity: [/aitreat/i],
+queries: ['AiTreat ("massage" OR "robot" OR "EMMA")']
   },
   {
     name: "Capsix Robotics",
     desc: "意大利，iYU 机械臂按摩机器人（KUKA LBR Med）",
     aliases: ["capsix", "iyu"],
-    queries: ['"Capsix Robotics"', '"iYU" ("massage" OR "robot")']
+        identity: [/capsix/i, /iYU/],
+queries: ['"Capsix Robotics"', '"iYU" ("massage" OR "robot")']
   },
   {
     name: "Phybot",
     desc: "以色列 Phybotics，LACO 机械臂按摩机器人",
     aliases: ["phybot"],
-    queries: ['Phybot']
+        identity: [/phybot/i],
+queries: ['Phybot']
   },
   {
     name: "Massage Robotics",
     desc: "美国，自主按摩机器人",
     aliases: ["massage robotics"],
-    queries: ['"Massage Robotics" ("robot" OR "massage")']
+        identity: [/massage robotics/i],
+queries: ['"Massage Robotics" ("robot" OR "massage")']
   }
 ];
 
@@ -1151,18 +1169,24 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
       if (sampleErrors.length < 3) sampleErrors.push(collected.errors[0]);
     }
     const prefiltered = collected.items.filter((item) => matchesAnyAlias(item, companies));
-    return seen ? prefiltered.filter((item) => !isSeenMarked(seen, item)) : prefiltered;
+    // 逐条按归属公司再核对一次 identity，挡掉同名/行情页。
+    const identityChecked = prefiltered.filter((item) => {
+      const owner = companies.find((company) => company.name === item.company);
+      return matchesIdentity(item, owner);
+    });
+    return seen ? identityChecked.filter((item) => !isSeenMarked(seen, item)) : identityChecked;
   };
 
   // —— 第一优先：11 家公司，有多少推多少（上限 limit=10，直链优先，跳转链接兜底）——
   const companyFresh = (await collectOneTier(COMPANIES, "zh", "公司档"))
-    .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title));
+    .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title, item.summary));
   let companyGroups = [];
   let companyLlm = null;
   if (companyFresh.length) {
     const filtered = await llmFilterCompetitorItems(env, companyFresh, COMPANIES);
     companyLlm = { used: filtered.used, reason: filtered.reason };
-    companyGroups = selectCompetitorGroups(COMPANIES, filtered.kept, limit);
+    // 先聚合同一事件的重复报道，再按公司分组。
+    companyGroups = selectCompetitorGroups(COMPANIES, clusterSameEvent(filtered.kept), limit);
   }
 
   // —— 第二优先：国外同类竞品（仅当公司层面一条都没有时）——
@@ -1173,7 +1197,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
     if (foreignFresh.length) {
       const filtered = await llmFilterCompetitorItems(env, foreignFresh, FOREIGN_COMPANIES);
       foreignLlm = { used: filtered.used, reason: filtered.reason };
-      foreignGroups = selectCompetitorGroups(FOREIGN_COMPANIES, filtered.kept, COMPETITOR_FILL_TARGET);
+      foreignGroups = selectCompetitorGroups(FOREIGN_COMPANIES, clusterSameEvent(filtered.kept), COMPETITOR_FILL_TARGET);
     }
   }
 
@@ -1197,7 +1221,7 @@ async function runCompetitorDigest(env, meta = {}, options = {}) {
       // 与已选公司/国外条目去重，直链优先，Google 跳转链接兜底。
       const linkQuality = (item) => (isGoogleNewsRedirect(item.url) ? 0 : 1);
       industryItems = filtered.kept
-        .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title))
+        .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title, item.summary))
         .filter((item) => !pushedSoFar.some((old) => itemKey(old) === itemKey(item) || competitorSameStory(old, item)))
         .sort((a, b) => linkQuality(b) - linkQuality(a) || b.dateMs - a.dateMs)
         .slice(0, room)
@@ -1482,7 +1506,7 @@ async function fetchDeepSeekSearchResults(env, query, cutoff) {
     };
   })
     .filter((item) => item.title && item.url)
-    .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title))
+    .filter((item) => !isFinanceDataUrl(item.url) && !isFinanceDataTitle(item.title, item.summary))
     .filter((item) => !item.publishedAt || dateMs(item.publishedAt) >= cutoff);
 }
 
@@ -1611,10 +1635,33 @@ function isFinanceDataUrl(url) {
 
 // 标题特征兜底：分红/除权/个股日历这类词基本只出现在证券数据页标题里；
 // 标题里嵌着股票代码（如“奥佳华(sz002614)”）的条目，链接也是行情页而非文章。
-function isFinanceDataTitle(title) {
+// 业务实体词：摘要里出现这些词说明是真新闻（公司做了什么），不是纯行情数据。
+const BUSINESS_SIGNAL = /(成立|发布|推出|合作|签约|投资|融资|研发|生产基地|展会|进博会|门店|机器人|按摩|理疗|艾灸|推拿|新品|订单|交付|代理|出海)/;
+
+function isFinanceDataTitle(title, summary) {
   const t = String(title || "");
-  return /(分红方案|分红融资|除权除息|派息日|股权登记日|个股日历|资金流向|龙虎榜|股东户数|财报|季报|中报|年报|问询函|停牌|复牌|减持|质押|招股)/.test(t)
-    || /[（(](sz|sh|bj)?\d{6}[)）]/i.test(t);
+  const s = String(summary || "");
+  // 纯证券数据词：无条件拦截。
+  if (/(分红方案|分红融资|除权除息|派息日|股权登记日|个股日历|资金流向|龙虎榜|股东户数)/.test(t)) return true;
+  // 标题带股票代码：摘要里有实体业务就放行（"荣泰健康(sh603579) 成立上海阿而泰
+  // 机器人公司"是条真新闻），只剩财务披露则拦。
+  if (/[（(](sz|sh|bj)?\d{6}[)）]/i.test(t)) {
+    return !BUSINESS_SIGNAL.test(s);
+  }
+  // 财报/股权类词：同样看摘要里有没有业务动作。
+  if (/(财报|季报|中报|年报|问询函|停牌|复牌|减持|质押|招股)/.test(t)) {
+    return !BUSINESS_SIGNAL.test(s);
+  }
+  return false;
+}
+
+// 防张冠李戴（借鉴 AIHOT IDENTITY_LEXICON）：条目的标题+摘要必须真的命中
+// 这家公司的 identity 词典，否则不算它的事。财联社"奥佳华(sz002614)"行情页
+// 这类噪音在这里被拦下。
+function matchesIdentity(item, company) {
+  if (!company || !Array.isArray(company.identity) || !company.identity.length) return true;
+  const text = `${item.title}\n${item.summary}`;
+  return company.identity.some((pattern) => pattern.test(text));
 }
 
 function matchesAnyAlias(item, companies) {
@@ -1804,6 +1851,51 @@ function selectCompetitorGroups(companies, items, limit) {
     total += picked.length;
   }
   return groups;
+}
+
+// 同事件聚类（借鉴 AIHOT 的 group-pair）：多家媒体报道同一次发生时合成一条，
+// 保留信息最全的那篇（摘要最长 + 有直链），避免卡片被同一件事刷屏。
+function clusterSameEvent(items) {
+  const clusters = [];
+  for (const item of items) {
+    const hit = clusters.find((cluster) => isSameOccurrence(cluster.head, item));
+    if (!hit) {
+      clusters.push({ head: item, members: [item] });
+      continue;
+    }
+    hit.members.push(item);
+    // 换更完整的那篇当代表：直链优先，其次摘要更长。
+    const better = selectBetterReport(hit.head, item);
+    if (better === item) hit.head = item;
+  }
+  return clusters.map((cluster) => ({
+    ...cluster.head,
+    alsoReportedBy: cluster.members
+      .filter((member) => member !== cluster.head)
+      .map((member) => member.sourceName)
+      .filter(Boolean)
+      .slice(0, 3)
+  }));
+}
+
+// 同一次发生的判定：同一公司 + 标题高度相似（字符二元组 Jaccard ≥ 0.5）
+// 或标题互相包含。跨语言的同一事件不合并（无法可靠判断）。
+function isSameOccurrence(a, b) {
+  if (a.company !== b.company) return false;
+  const ta = normalizeCompetitorTitle(a.title);
+  const tb = normalizeCompetitorTitle(b.title);
+  if (!ta || !tb) return false;
+  if (Math.min(ta.length, tb.length) >= 8 && (ta.includes(tb) || tb.includes(ta))) return true;
+  const ga = bigrams(ta);
+  const gb = bigrams(tb);
+  if (!ga.size || !gb.size) return false;
+  const overlap = [...ga].filter((gram) => gb.has(gram)).length / new Set([...ga, ...gb]).size;
+  return overlap >= 0.5;
+}
+
+function selectBetterReport(a, b) {
+  const score = (item) => (isGoogleNewsRedirect(item.url) ? 0 : 10) + Math.min(String(item.summary || "").length / 100, 5);
+  return score(b) > score(a) ? b : a;
 }
 
 // Cross-engine and cross-run dedupe: exact key, plus a stricter-than-digest

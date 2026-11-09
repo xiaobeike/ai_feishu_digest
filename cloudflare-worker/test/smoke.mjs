@@ -675,6 +675,31 @@ const lichiNoiseItem = () => rssItem({
   }
 }
 
+// 21. 借鉴 AIHOT 的两项：防张冠李戴（identity 词表）+ 同事件聚类。
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes("open.bigmodel.cn")) return llmStubResponse(input, init);
+    return searchStub({ google: {
+      具身风暴: [
+        // 同一事件的三家报道 + 一条无关噪音
+        rssItem({ title: "具身风暴获爱善天使集团投资", media: "网易", url: "https://example.com/a1", snippet: "具身风暴转向AI理疗机器人，获爱善天使投资。", ageHours: 2 }),
+        rssItem({ title: "具身风暴获爱善天使集团投资", media: "新浪", url: "https://example.com/a2", snippet: "具身风暴转向AI理疗机器人，获爱善天使集团战略投资。", ageHours: 3 }),
+        rssItem({ title: "具身风暴完成新一轮融资", media: "36氪", url: "https://example.com/a3", snippet: "具身风暴完成融资，投资方为爱善天使集团。", ageHours: 4 })
+      ]
+    } })(input);
+  };
+  try {
+    const { body } = await run({ ...baseEnv, ZHIPU_API_KEY: "test-key", DEEPSEEK_API_KEY: "test-ds" }, "?job=competitor&dry=1");
+    const titles = (body.groups || []).flatMap((g) => g.titles);
+    check("clustering: near-identical reports merged", titles.length === 2, `titles=${JSON.stringify(titles)}`);
+    check("clustering: card shows co-reporters", JSON.stringify(body.feishu.payload).includes("网易") || JSON.stringify(body.feishu.payload).includes("新浪"), JSON.stringify(titles));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 const failed = results.filter((result) => !result.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length) {
